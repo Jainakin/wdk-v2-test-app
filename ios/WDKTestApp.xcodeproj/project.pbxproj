@@ -11,6 +11,10 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		AA0002000000000000000001 /* WDKBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000001 /* WDKBridge.swift */; };
+		AA0002000000000000000002 /* WDKBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000002 /* WDKBridge.m */; };
+		AA0002000000000000000003 /* wdk-bundle.js in Resources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000003 /* wdk-bundle.js */; };
+		AB6F17B3DFFDFDD82DAE763D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -23,6 +27,11 @@
 		5DCACB8F33CDC322A6C60F78 /* libPods-WDKTestApp.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-WDKTestApp.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = WDKTestApp/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = WDKTestApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		AA0001000000000000000001 /* WDKBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WDKBridge.swift; sourceTree = "<group>"; };
+		AA0001000000000000000002 /* WDKBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WDKBridge.m; sourceTree = "<group>"; };
+		AA0001000000000000000003 /* wdk-bundle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "wdk-bundle.js"; sourceTree = "<group>"; };
+		AA0001000000000000000004 /* libwdk_all.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwdk_all.a; sourceTree = "<group>"; };
+		AA0001000000000000000005 /* WDKTestApp-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WDKTestApp-Bridging-Header.h"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -46,6 +55,11 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
+				AA0001000000000000000001 /* WDKBridge.swift */,
+				AA0001000000000000000002 /* WDKBridge.m */,
+				AA0001000000000000000003 /* wdk-bundle.js */,
+				AA0001000000000000000004 /* libwdk_all.a */,
+				AA0001000000000000000005 /* WDKTestApp-Bridging-Header.h */,
 			);
 			name = WDKTestApp;
 			sourceTree = "<group>";
@@ -159,6 +173,8 @@
 			files = (
 				81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
+				AA0002000000000000000003 /* wdk-bundle.js in Resources */,
+				AB6F17B3DFFDFDD82DAE763D /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -245,6 +261,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				AA0002000000000000000001 /* WDKBridge.swift in Sources */,
+				AA0002000000000000000002 /* WDKBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -270,9 +288,12 @@
 					"$(inherited)",
 					"-ObjC",
 					"-lc++",
+					"-force_load",
+					"$(SRCROOT)/libwdk_all.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "org.reactjs.native.example.$(PRODUCT_NAME:rfc1034identifier)";
 				PRODUCT_NAME = WDKTestApp;
+				SWIFT_OBJC_BRIDGING_HEADER = "WDKTestApp-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -297,9 +318,12 @@
 					"$(inherited)",
 					"-ObjC",
 					"-lc++",
+					"-force_load",
+					"$(SRCROOT)/libwdk_all.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "org.reactjs.native.example.$(PRODUCT_NAME:rfc1034identifier)";
 				PRODUCT_NAME = WDKTestApp;
+				SWIFT_OBJC_BRIDGING_HEADER = "WDKTestApp-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
 			};
@@ -366,6 +390,7 @@
 				);
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CFLAGS = "$(inherited)";
 				OTHER_CPLUSPLUSFLAGS = (
 					"$(OTHER_CFLAGS)",
 					"-DFOLLY_NO_CONFIG",
@@ -374,7 +399,10 @@
 					"-DFOLLY_CFG_NO_COROUTINES=1",
 					"-DFOLLY_HAVE_CLOCK_GETTIME=1",
 				);
+				REACT_NATIVE_PATH = "${PODS_ROOT}/../../node_modules/react-native";
 				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				USE_HERMES = true;
 			};
 			name = Debug;
 		};
@@ -431,6 +459,7 @@
 					"\"$(inherited)\"",
 				);
 				MTL_ENABLE_DEBUG_INFO = NO;
+				OTHER_CFLAGS = "$(inherited)";
 				OTHER_CPLUSPLUSFLAGS = (
 					"$(OTHER_CFLAGS)",
 					"-DFOLLY_NO_CONFIG",
@@ -439,7 +468,9 @@
 					"-DFOLLY_CFG_NO_COROUTINES=1",
 					"-DFOLLY_HAVE_CLOCK_GETTIME=1",
 				);
+				REACT_NATIVE_PATH = "${PODS_ROOT}/../../node_modules/react-native";
 				SDKROOT = iphoneos;
+				USE_HERMES = true;
 				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
