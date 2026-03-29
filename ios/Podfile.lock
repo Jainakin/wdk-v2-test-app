@@ -2539,6 +2539,7 @@ PODS:
   - SocketRocket (0.7.1)
   - wdk-v2-react-native (0.1.0):
     - React-Core
+    - React-NativeModulesApple
     - ReactCommon/turbomodule/core
   - Yoga (0.0.0)
 
@@ -2869,7 +2870,7 @@ SPEC CHECKSUMS:
   ReactCodegen: 53a01767e04b3a23f128b5a3c6542b4ab24fb921
   ReactCommon: 5901ef412ae35cc727b9584d4f7e3e1f7f17c251
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  wdk-v2-react-native: d5c5cb2953a43c4f1db0a4336acd8b31a87047ca
+  wdk-v2-react-native: cd9f37dd80120002c0412f101215bd4ab5424fd9
   Yoga: b669e79fa0f8d3f6f5e35372345f54b99e06b13c
 
 PODFILE CHECKSUM: a66b5b8509a8c1d01c05377ad4e0b3636232e65c

@@ -1,0 +1,1255 @@
+"use strict";
+var __wdk_exports = (() => {
+  // ../wdk-v2-utils/src/errors.ts
+  var WDKError = class extends Error {
+    constructor(code, message) {
+      super(message);
+      this.name = "WDKError";
+      this.code = code;
+    }
+  };
+  var CryptoError = class extends WDKError {
+    constructor(message) {
+      super("CRYPTO_ERROR", message);
+      this.name = "CryptoError";
+    }
+  };
+  var StateError = class extends WDKError {
+    constructor(message) {
+      super("STATE_ERROR", message);
+      this.name = "StateError";
+    }
+  };
+
+  // src/keys.ts
+  var KeyManager = class {
+    constructor() {
+      this.handles = /* @__PURE__ */ new Set();
+      this.seedHandle = null;
+    }
+    /** Track a key handle (returned by native.crypto.deriveKey etc.) */
+    track(handle) {
+      this.handles.add(handle);
+      return handle;
+    }
+    /** Release a single key handle */
+    release(handle) {
+      if (this.handles.has(handle)) {
+        native.crypto.releaseKey(handle);
+        this.handles.delete(handle);
+      }
+    }
+    /** Set the master seed handle. Releases the previous handle if one is already tracked. */
+    setSeedHandle(handle) {
+      if (this.seedHandle !== null) {
+        native.crypto.releaseKey(this.seedHandle);
+        this.handles.delete(this.seedHandle);
+      }
+      this.seedHandle = handle;
+      this.handles.add(handle);
+    }
+    /** Get the seed handle (throws if not set) */
+    getSeedHandle() {
+      if (this.seedHandle === null) {
+        throw new Error("Seed handle not set \u2014 wallet not unlocked");
+      }
+      return this.seedHandle;
+    }
+    /** Derive a key from seed at a BIP-44 path and track it */
+    deriveAndTrack(path) {
+      const handle = native.crypto.deriveKey(this.getSeedHandle(), path);
+      return this.track(handle);
+    }
+    /** Release ALL tracked handles including seed. Called on lock/destroy. */
+    releaseAll() {
+      for (const handle of this.handles) {
+        native.crypto.releaseKey(handle);
+      }
+      this.handles.clear();
+      this.seedHandle = null;
+    }
+    /** Number of active handles */
+    get count() {
+      return this.handles.size;
+    }
+  };
+
+  // src/events.ts
+  var EventEmitter = class {
+    constructor() {
+      this.listeners = /* @__PURE__ */ new Map();
+    }
+    on(event, callback) {
+      let set = this.listeners.get(event);
+      if (!set) {
+        set = /* @__PURE__ */ new Set();
+        this.listeners.set(event, set);
+      }
+      set.add(callback);
+    }
+    off(event, callback) {
+      const set = this.listeners.get(event);
+      if (set) {
+        set.delete(callback);
+        if (set.size === 0) {
+          this.listeners.delete(event);
+        }
+      }
+    }
+    once(event, callback) {
+      const wrapper = (...args) => {
+        this.off(event, wrapper);
+        callback(...args);
+      };
+      this.on(event, wrapper);
+    }
+    emit(event, ...args) {
+      const set = this.listeners.get(event);
+      if (set) {
+        for (const callback of set) {
+          callback(...args);
+        }
+      }
+    }
+    removeAllListeners(event) {
+      if (event !== void 0) {
+        this.listeners.delete(event);
+      } else {
+        this.listeners.clear();
+      }
+    }
+  };
+  var WDKEvents = {
+    WALLET_CREATED: "wallet:created",
+    WALLET_UNLOCKED: "wallet:unlocked",
+    WALLET_LOCKED: "wallet:locked",
+    WALLET_DESTROYED: "wallet:destroyed",
+    CHAIN_REGISTERED: "chain:registered",
+    TX_SENT: "tx:sent",
+    TX_CONFIRMED: "tx:confirmed",
+    TX_FAILED: "tx:failed",
+    ERROR: "error"
+  };
+
+  // src/registry.ts
+  var ChainRegistry = class {
+    constructor() {
+      this.modules = /* @__PURE__ */ new Map();
+    }
+    register(module) {
+      this.modules.set(module.chainId, module);
+    }
+    get(chainId) {
+      const mod = this.modules.get(chainId);
+      if (!mod) throw new Error(`Chain module not registered: ${chainId}`);
+      return mod;
+    }
+    has(chainId) {
+      return this.modules.has(chainId);
+    }
+    getAll() {
+      return Array.from(this.modules.values());
+    }
+    destroyAll() {
+      for (const mod of this.modules.values()) {
+        mod.destroy();
+      }
+      this.modules.clear();
+    }
+  };
+
+  // src/config.ts
+  var DEFAULT_CONFIG = {
+    defaultNetwork: "mainnet",
+    networks: {
+      btc: {
+        chainId: "btc",
+        networkId: "mainnet",
+        rpcUrl: "",
+        isTestnet: false,
+        network: "bitcoin"
+      },
+      evm: {
+        chainId: "evm",
+        networkId: "mainnet",
+        rpcUrl: "",
+        isTestnet: false
+      },
+      ton: {
+        chainId: "ton",
+        networkId: "mainnet",
+        rpcUrl: "",
+        isTestnet: false
+      },
+      tron: {
+        chainId: "tron",
+        networkId: "mainnet",
+        rpcUrl: "",
+        isTestnet: false
+      },
+      solana: {
+        chainId: "solana",
+        networkId: "mainnet",
+        rpcUrl: "",
+        isTestnet: false
+      }
+    },
+    logLevel: "info"
+  };
+  function mergeConfig(base, override) {
+    return {
+      defaultNetwork: override.defaultNetwork ?? base.defaultNetwork,
+      networks: override.networks ? { ...base.networks, ...override.networks } : { ...base.networks },
+      logLevel: override.logLevel ?? base.logLevel
+    };
+  }
+
+  // src/engine.ts
+  var WDKEngine = class {
+    constructor(config) {
+      this.state = "locked";
+      this.keys = new KeyManager();
+      this.events = new EventEmitter();
+      this.registry = new ChainRegistry();
+      this.config = mergeConfig(DEFAULT_CONFIG, config || {});
+    }
+    // ── Lifecycle ──
+    /** Generate a new wallet (12 or 24 word mnemonic) */
+    createWallet(params) {
+      if (this.state === "destroyed") {
+        throw new StateError("Wallet has been destroyed and cannot be reused");
+      }
+      const wordCount = params?.wordCount || 12;
+      const mnemonic = native.crypto.generateMnemonic(wordCount);
+      this.state = "created";
+      this.events.emit(WDKEvents.WALLET_CREATED);
+      return { mnemonic };
+    }
+    /** Unlock wallet with mnemonic — derives seed and master key */
+    unlockWallet(params) {
+      if (this.state === "destroyed") {
+        throw new StateError("Wallet has been destroyed and cannot be reused");
+      }
+      const words = params.mnemonic.trim().split(/\s+/);
+      if (words.length !== 12 && words.length !== 24) {
+        throw new CryptoError("Mnemonic must be 12 or 24 words");
+      }
+      const seedHandle = native.crypto.mnemonicToSeed(params.mnemonic, params.passphrase);
+      this.keys.setSeedHandle(seedHandle);
+      this.state = "unlocked";
+      this.events.emit(WDKEvents.WALLET_UNLOCKED);
+      for (const wallet of this.registry.getAll()) {
+        const networkKey = `${wallet.chainId}:${this.config.defaultNetwork}`;
+        const networkConfig = this.config.networks[networkKey] || this.config.networks[wallet.chainId];
+        if (networkConfig) {
+          wallet.initialize(networkConfig);
+        }
+      }
+      this.state = "ready";
+      return { seedHandle };
+    }
+    /** Lock wallet — releases all key handles */
+    lockWallet() {
+      if (this.state === "destroyed") {
+        throw new StateError("Wallet has been destroyed");
+      }
+      this.keys.releaseAll();
+      this.state = "locked";
+      this.events.emit(WDKEvents.WALLET_LOCKED);
+    }
+    /** Destroy wallet — release keys, clear state, cannot be reused */
+    destroyWallet() {
+      this.keys.releaseAll();
+      this.registry.destroyAll();
+      this.events.emit(WDKEvents.WALLET_DESTROYED);
+      this.events.removeAllListeners();
+      this.state = "destroyed";
+    }
+    // ── Chain Module Registration ──
+    registerChain(module) {
+      this.registry.register(module);
+      this.events.emit(WDKEvents.CHAIN_REGISTERED, { chain: module.chainId });
+    }
+    // ── Dispatch ──
+    /** Route API calls to the right chain module */
+    async dispatch(action, params) {
+      if (this.state !== "ready") {
+        throw new StateError("Wallet not ready");
+      }
+      const chainId = params.chain;
+      if (!chainId) {
+        throw new StateError('Missing "chain" parameter');
+      }
+      const wallet = this.registry.get(chainId);
+      switch (action) {
+        case "getAddress": {
+          const index = params.index ?? 0;
+          const keyHandle = this.keys.deriveAndTrack(
+            wallet.getDerivationPath(index)
+          );
+          return wallet.getAddress(keyHandle, index);
+        }
+        case "getBalance": {
+          const address = params.address;
+          if (!address) throw new StateError('Missing "address" parameter');
+          return wallet.getBalance(address);
+        }
+        case "send": {
+          const sendIndex = params.index ?? 0;
+          const senderKeyHandle = this.keys.deriveAndTrack(
+            wallet.getDerivationPath(sendIndex)
+          );
+          const senderAddress = await wallet.getAddress(senderKeyHandle, sendIndex);
+          const txParams = {
+            ...params,
+            from: senderAddress
+          };
+          const tx = await wallet.buildTransaction(txParams);
+          const signed = await wallet.signTransaction(tx, senderKeyHandle);
+          const txHash = await wallet.broadcastTransaction(signed);
+          this.events.emit(WDKEvents.TX_SENT, { chain: chainId, txHash });
+          return { txHash };
+        }
+        case "getHistory": {
+          const address = params.address;
+          if (!address) throw new StateError('Missing "address" parameter');
+          const limit = params.limit;
+          return wallet.getTransactionHistory(address, limit);
+        }
+        default:
+          throw new StateError(`Unknown action: ${action}`);
+      }
+    }
+    // ── Configuration ──
+    /**
+     * Merge a partial config into the engine's current config.
+     * Call before unlockWallet() so chain modules are initialized with
+     * the updated settings (e.g. switching to testnet).
+     */
+    configure(partial) {
+      this.config = mergeConfig(this.config, partial);
+    }
+    // ── Accessors ──
+    getState() {
+      return this.state;
+    }
+    getConfig() {
+      return this.config;
+    }
+    getKeyManager() {
+      return this.keys;
+    }
+    getEvents() {
+      return this.events;
+    }
+  };
+
+  // src/wallet.ts
+  var BaseWallet = class {
+    constructor(chainId, coinType, curve) {
+      this.config = null;
+      this.chainId = chainId;
+      this.coinType = coinType;
+      this.curve = curve;
+    }
+    /** Initialize with network config */
+    async initialize(config) {
+      this.config = config;
+    }
+    /**
+     * Return the BIP derivation path for a given address index.
+     * Override in chain modules that use a non-BIP-44 standard.
+     * e.g. Bitcoin SegWit uses BIP-84: m/84'/coinType'/0'/0/index
+     */
+    getDerivationPath(index) {
+      return `m/44'/${this.coinType}'/0'/0/${index}`;
+    }
+    /** Cleanup resources */
+    destroy() {
+      this.config = null;
+    }
+    /** Helper: make an RPC call via native.net.fetch */
+    async rpcCall(method, params) {
+      if (!this.config) throw new Error("Wallet not initialized");
+      const response = await native.net.fetch(this.config.rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
+      });
+      const json = JSON.parse(native.encoding.utf8Decode(response.body));
+      if (json.error) throw new Error(json.error.message);
+      return json.result;
+    }
+  };
+
+  // ../wdk-v2-wallet-btc/src/address.ts
+  function convertBits(data, fromBits, toBits, pad) {
+    let acc = 0;
+    let bits = 0;
+    const maxv = (1 << toBits) - 1;
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+      const value = data[i];
+      if (value < 0 || value >> fromBits !== 0) return null;
+      acc = acc << fromBits | value;
+      bits += fromBits;
+      while (bits >= toBits) {
+        bits -= toBits;
+        result.push(acc >> bits & maxv);
+      }
+    }
+    if (pad) {
+      if (bits > 0) {
+        result.push(acc << toBits - bits & maxv);
+      }
+    } else {
+      if (bits >= fromBits) return null;
+      if ((acc << toBits - bits & maxv) !== 0) return null;
+    }
+    return new Uint8Array(result);
+  }
+  function generateSegwitAddress(keyHandle, isTestnet = false) {
+    const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+    const sha = native.crypto.sha256(pubkey);
+    const hash160 = native.crypto.ripemd160(sha);
+    const data5 = convertBits(hash160, 8, 5, true);
+    if (!data5) {
+      throw new Error("Failed to convert pubkey hash to 5-bit groups");
+    }
+    const hrp = isTestnet ? "tb" : "bc";
+    const witnessData = new Uint8Array(1 + data5.length);
+    witnessData[0] = 0;
+    witnessData.set(data5, 1);
+    return native.encoding.bech32Encode(hrp, witnessData);
+  }
+
+  // ../wdk-v2-wallet-btc/src/utxo.ts
+  var VBYTES_PER_INPUT = 68;
+  var VBYTES_PER_OUTPUT = 31;
+  var TX_OVERHEAD_VBYTES = 11;
+  var DUST_THRESHOLD = 546;
+  function selectUtxos(utxos, targetAmount, feeRate) {
+    const sorted = [...utxos].sort((a, b) => b.value - a.value);
+    const selected = [];
+    let totalInput = 0;
+    for (const utxo of sorted) {
+      selected.push(utxo);
+      totalInput += utxo.value;
+      const vbytes2 = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + 2 * VBYTES_PER_OUTPUT;
+      const fee2 = Math.ceil(vbytes2 * feeRate);
+      if (totalInput >= targetAmount + fee2) {
+        const change = totalInput - targetAmount - fee2;
+        if (change > 0 && change < DUST_THRESHOLD) {
+          return { selected, fee: totalInput - targetAmount, change: 0 };
+        }
+        return { selected, fee: fee2, change };
+      }
+    }
+    return null;
+  }
+
+  // ../wdk-v2-wallet-btc/src/transaction.ts
+  function writeUint32LE(value) {
+    const buf = new Uint8Array(4);
+    buf[0] = value & 255;
+    buf[1] = value >>> 8 & 255;
+    buf[2] = value >>> 16 & 255;
+    buf[3] = value >>> 24 & 255;
+    return buf;
+  }
+  function writeUint64LE(value) {
+    const buf = new Uint8Array(8);
+    buf[0] = value & 255;
+    buf[1] = value >>> 8 & 255;
+    buf[2] = value >>> 16 & 255;
+    buf[3] = value >>> 24 & 255;
+    const hi = Math.floor(value / 4294967296);
+    buf[4] = hi & 255;
+    buf[5] = hi >>> 8 & 255;
+    buf[6] = hi >>> 16 & 255;
+    buf[7] = hi >>> 24 & 255;
+    return buf;
+  }
+  function writeVarInt(value) {
+    if (value < 253) {
+      return new Uint8Array([value]);
+    } else if (value <= 65535) {
+      const buf = new Uint8Array(3);
+      buf[0] = 253;
+      buf[1] = value & 255;
+      buf[2] = value >>> 8 & 255;
+      return buf;
+    } else if (value <= 4294967295) {
+      const buf = new Uint8Array(5);
+      buf[0] = 254;
+      buf[1] = value & 255;
+      buf[2] = value >>> 8 & 255;
+      buf[3] = value >>> 16 & 255;
+      buf[4] = value >>> 24 & 255;
+      return buf;
+    } else {
+      const buf = new Uint8Array(9);
+      buf[0] = 255;
+      const lo = value & 4294967295;
+      const hi = Math.floor(value / 4294967296);
+      buf[1] = lo & 255;
+      buf[2] = lo >>> 8 & 255;
+      buf[3] = lo >>> 16 & 255;
+      buf[4] = lo >>> 24 & 255;
+      buf[5] = hi & 255;
+      buf[6] = hi >>> 8 & 255;
+      buf[7] = hi >>> 16 & 255;
+      buf[8] = hi >>> 24 & 255;
+      return buf;
+    }
+  }
+  function concat(...arrays) {
+    let totalLength = 0;
+    for (const arr of arrays) totalLength += arr.length;
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const arr of arrays) {
+      result.set(arr, offset);
+      offset += arr.length;
+    }
+    return result;
+  }
+  function appendByte(data, byte) {
+    const out = new Uint8Array(data.length + 1);
+    out.set(data);
+    out[data.length] = byte;
+    return out;
+  }
+  function hash256(data) {
+    return native.crypto.sha256(native.crypto.sha256(data));
+  }
+  function reverseTxid(txidHex) {
+    const bytes = native.encoding.hexDecode(txidHex);
+    const reversed = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) {
+      reversed[i] = bytes[bytes.length - 1 - i];
+    }
+    return reversed;
+  }
+  function addressToScriptPubKey(address) {
+    let decoded;
+    try {
+      decoded = native.encoding.bech32Decode(address);
+    } catch {
+      try {
+        decoded = native.encoding.bech32mDecode(address);
+      } catch {
+        throw new Error(`Unsupported address format: ${address}. Only bech32 (bc1q) and bech32m (bc1p) addresses are supported.`);
+      }
+    }
+    const witnessVersion = decoded.data[0];
+    const data5bit = decoded.data.slice(1);
+    const program = convertBits5to8(data5bit);
+    const script = new Uint8Array(2 + program.length);
+    script[0] = witnessVersion === 0 ? 0 : 80 + witnessVersion;
+    script[1] = program.length;
+    script.set(program, 2);
+    return script;
+  }
+  function convertBits5to8(data) {
+    let acc = 0;
+    let bits = 0;
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+      acc = acc << 5 | data[i];
+      bits += 5;
+      while (bits >= 8) {
+        bits -= 8;
+        result.push(acc >> bits & 255);
+      }
+    }
+    return new Uint8Array(result);
+  }
+  function encodeDER(sig) {
+    if (sig.length !== 64) {
+      throw new Error(`Expected 64-byte signature, got ${sig.length}`);
+    }
+    const r = sig.slice(0, 32);
+    const s = sig.slice(32, 64);
+    const encR = encodeSignedInt(r);
+    const encS = encodeSignedInt(s);
+    const totalLen = 2 + encR.length + 2 + encS.length;
+    const der = new Uint8Array(2 + totalLen);
+    let pos = 0;
+    der[pos++] = 48;
+    der[pos++] = totalLen;
+    der[pos++] = 2;
+    der[pos++] = encR.length;
+    der.set(encR, pos);
+    pos += encR.length;
+    der[pos++] = 2;
+    der[pos++] = encS.length;
+    der.set(encS, pos);
+    return der;
+  }
+  function encodeSignedInt(value) {
+    let start = 0;
+    while (start < value.length - 1 && value[start] === 0) {
+      start++;
+    }
+    const trimmed = value.slice(start);
+    if (trimmed[0] & 128) {
+      const padded = new Uint8Array(trimmed.length + 1);
+      padded[0] = 0;
+      padded.set(trimmed, 1);
+      return padded;
+    }
+    return trimmed;
+  }
+  function computeSegwitSighash(inputs, outputs, inputIndex, keyHandle) {
+    const SIGHASH_ALL = 1;
+    const nVersion = writeUint32LE(2);
+    const nLockTime = writeUint32LE(0);
+    const nHashType = writeUint32LE(SIGHASH_ALL);
+    const outpoints = [];
+    for (const inp of inputs) {
+      outpoints.push(reverseTxid(inp.txid));
+      outpoints.push(writeUint32LE(inp.vout));
+    }
+    const hashPrevouts = hash256(concat(...outpoints));
+    const sequences = [];
+    for (let i = 0; i < inputs.length; i++) {
+      sequences.push(writeUint32LE(4294967295));
+    }
+    const hashSequence = hash256(concat(...sequences));
+    const outputParts = [];
+    for (const out of outputs) {
+      outputParts.push(writeUint64LE(out.value));
+      const scriptPubKey = addressToScriptPubKey(out.address);
+      outputParts.push(writeVarInt(scriptPubKey.length));
+      outputParts.push(scriptPubKey);
+    }
+    const hashOutputs = hash256(concat(...outputParts));
+    const thisOutpoint = concat(
+      reverseTxid(inputs[inputIndex].txid),
+      writeUint32LE(inputs[inputIndex].vout)
+    );
+    const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+    const pubkeySha = native.crypto.sha256(pubkey);
+    const pubkeyHash = native.crypto.ripemd160(pubkeySha);
+    const scriptCode = new Uint8Array(26);
+    scriptCode[0] = 25;
+    scriptCode[1] = 118;
+    scriptCode[2] = 169;
+    scriptCode[3] = 20;
+    scriptCode.set(pubkeyHash, 4);
+    scriptCode[24] = 136;
+    scriptCode[25] = 172;
+    const value = writeUint64LE(inputs[inputIndex].value);
+    const nSequence = writeUint32LE(4294967295);
+    const preimage = concat(
+      nVersion,
+      hashPrevouts,
+      hashSequence,
+      thisOutpoint,
+      scriptCode,
+      value,
+      nSequence,
+      hashOutputs,
+      nLockTime,
+      nHashType
+    );
+    return hash256(preimage);
+  }
+  function serializeTransaction(inputs, outputs, witnesses) {
+    const parts = [];
+    parts.push(writeUint32LE(2));
+    parts.push(new Uint8Array([0, 1]));
+    parts.push(writeVarInt(inputs.length));
+    for (const inp of inputs) {
+      parts.push(reverseTxid(inp.txid));
+      parts.push(writeUint32LE(inp.vout));
+      parts.push(writeVarInt(0));
+      parts.push(writeUint32LE(4294967295));
+    }
+    parts.push(writeVarInt(outputs.length));
+    for (const out of outputs) {
+      parts.push(writeUint64LE(out.value));
+      const scriptPubKey = addressToScriptPubKey(out.address);
+      parts.push(writeVarInt(scriptPubKey.length));
+      parts.push(scriptPubKey);
+    }
+    for (const witness of witnesses) {
+      parts.push(writeVarInt(witness.length));
+      for (const item of witness) {
+        parts.push(writeVarInt(item.length));
+        parts.push(item);
+      }
+    }
+    parts.push(writeUint32LE(0));
+    return concat(...parts);
+  }
+  function serializeTransactionNoWitness(inputs, outputs) {
+    const parts = [];
+    parts.push(writeUint32LE(2));
+    parts.push(writeVarInt(inputs.length));
+    for (const inp of inputs) {
+      parts.push(reverseTxid(inp.txid));
+      parts.push(writeUint32LE(inp.vout));
+      parts.push(writeVarInt(0));
+      parts.push(writeUint32LE(4294967295));
+    }
+    parts.push(writeVarInt(outputs.length));
+    for (const out of outputs) {
+      parts.push(writeUint64LE(out.value));
+      const scriptPubKey = addressToScriptPubKey(out.address);
+      parts.push(writeVarInt(scriptPubKey.length));
+      parts.push(scriptPubKey);
+    }
+    parts.push(writeUint32LE(0));
+    return concat(...parts);
+  }
+  function computeTxid(inputs, outputs) {
+    const rawNoWitness = serializeTransactionNoWitness(inputs, outputs);
+    const h = hash256(rawNoWitness);
+    const reversed = new Uint8Array(h.length);
+    for (let i = 0; i < h.length; i++) {
+      reversed[i] = h[h.length - 1 - i];
+    }
+    return reversed;
+  }
+  function buildTransaction(inputs, outputs, keyHandles) {
+    if (inputs.length !== keyHandles.length) {
+      throw new Error(
+        `Mismatched inputs (${inputs.length}) and keyHandles (${keyHandles.length})`
+      );
+    }
+    if (inputs.length === 0) {
+      throw new Error("Transaction must have at least one input");
+    }
+    if (outputs.length === 0) {
+      throw new Error("Transaction must have at least one output");
+    }
+    const witnesses = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const sighash = computeSegwitSighash(inputs, outputs, i, keyHandles[i]);
+      const signature = native.crypto.signSecp256k1(keyHandles[i], sighash);
+      const derSig = encodeDER(signature);
+      const sigWithHashType = appendByte(derSig, 1);
+      const pubkey = native.crypto.getPublicKey(keyHandles[i], "secp256k1");
+      witnesses.push([sigWithHashType, pubkey]);
+    }
+    const rawTx = serializeTransaction(inputs, outputs, witnesses);
+    const txid = computeTxid(inputs, outputs);
+    return {
+      rawTx: native.encoding.hexEncode(rawTx),
+      txid: native.encoding.hexEncode(txid)
+    };
+  }
+
+  // ../wdk-v2-wallet-btc/src/client/blockbook-client.ts
+  var BASE_URLS = {
+    bitcoin: "https://btc1.trezor.io",
+    testnet: "https://tbtc1.trezor.io",
+    regtest: ""
+    // regtest needs user-provided URL
+  };
+  var MEMPOOL_FEE_URL = "https://mempool.space/api/v1/fees/recommended";
+  var BlockbookClient = class {
+    constructor(network = "bitcoin", customUrl) {
+      this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS[network];
+      if (!this.baseUrl) {
+        throw new Error(
+          `No default Blockbook server for network '${network}'. Provide a custom URL.`
+        );
+      }
+    }
+    async connect() {
+    }
+    async close() {
+    }
+    async reconnect() {
+    }
+    async getBalance(address) {
+      const data = await this.fetchJson(`/api/v2/address/${address}?details=basic`);
+      return {
+        confirmed: Number(data.balance),
+        unconfirmed: Number(data.unconfirmedBalance)
+      };
+    }
+    async listUnspent(address) {
+      const utxos = await this.fetchJson(`/api/v2/utxo/${address}`);
+      return utxos.map((u) => ({
+        tx_hash: u.txid,
+        tx_pos: u.vout,
+        value: Number(u.value),
+        height: u.height ?? 0
+      }));
+    }
+    async getHistory(address) {
+      const entries = [];
+      let page = 1;
+      let totalPages = 1;
+      while (page <= totalPages) {
+        const data = await this.fetchJson(`/api/v2/address/${address}?details=txslight&pageSize=1000&page=${page}`);
+        totalPages = data.totalPages;
+        if (data.transactions) {
+          for (const tx of data.transactions) {
+            entries.push({
+              tx_hash: tx.txid,
+              height: tx.blockHeight > 0 ? tx.blockHeight : 0
+            });
+          }
+        }
+        page++;
+      }
+      return entries;
+    }
+    async getTransaction(txHash) {
+      const data = await this.fetchJson(`/api/v2/tx/${txHash}`);
+      if (!data.hex) {
+        throw new Error(`No hex data in Blockbook response for tx ${txHash}`);
+      }
+      return data.hex;
+    }
+    async broadcast(rawTx) {
+      const data = await this.fetchJson(`/api/v2/sendtx/${rawTx}`);
+      if (data.error) {
+        throw new Error(`Broadcast failed: ${data.error}`);
+      }
+      return data.result ?? "";
+    }
+    async estimateFee(blocks) {
+      try {
+        const data = await this.fetchJson(`/api/v2/estimatefee/${blocks}`);
+        const rate = parseFloat(data.result);
+        if (rate > 0) return rate;
+      } catch {
+      }
+      return this.estimateFeeFromMempool(blocks);
+    }
+    // ── Private helpers ──────────────────────────────────────────────────────
+    /**
+     * Fallback fee estimation from mempool.space.
+     * Matches production blockbook-client.js _estimateFeeFromMempool().
+     */
+    async estimateFeeFromMempool(blocks) {
+      const response = await native.net.fetch(MEMPOOL_FEE_URL);
+      if (response.status !== 200) {
+        throw new Error("Fee estimation failed from both Blockbook and mempool.space");
+      }
+      const bodyText = response.body ? native.encoding.utf8Decode(response.body) : "";
+      const data = JSON.parse(bodyText);
+      let satPerVb;
+      if (blocks <= 1) {
+        satPerVb = data.fastestFee;
+      } else if (blocks <= 3) {
+        satPerVb = data.halfHourFee;
+      } else if (blocks <= 6) {
+        satPerVb = data.hourFee;
+      } else {
+        satPerVb = data.economyFee;
+      }
+      return satPerVb / 1e5;
+    }
+    async fetchJson(path) {
+      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      if (response.status !== 200) {
+        const body = response.body ? native.encoding.utf8Decode(response.body) : "";
+        throw new Error(
+          `Blockbook API error: status ${response.status} for ${path}: ${body}`
+        );
+      }
+      const bodyText = response.body ? native.encoding.utf8Decode(response.body) : "";
+      return JSON.parse(bodyText);
+    }
+  };
+
+  // ../wdk-v2-wallet-btc/src/client/mempool-rest-client.ts
+  var BASE_URLS2 = {
+    bitcoin: "https://mempool.space/api",
+    testnet: "https://mempool.space/testnet4/api",
+    regtest: "https://mempool.space/api"
+    // regtest needs user-provided URL
+  };
+  var MempoolRestClient = class {
+    constructor(network = "bitcoin", customUrl) {
+      this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS2[network];
+    }
+    async connect() {
+    }
+    async close() {
+    }
+    async reconnect() {
+    }
+    async getBalance(address) {
+      const data = await this.fetchJson(`/address/${address}`);
+      const confirmed = data.chain_stats.funded_txo_sum - data.chain_stats.spent_txo_sum;
+      const unconfirmed = data.mempool_stats.funded_txo_sum - data.mempool_stats.spent_txo_sum;
+      return { confirmed, unconfirmed };
+    }
+    async listUnspent(address) {
+      const rawUtxos = await this.fetchJson(`/address/${address}/utxo`);
+      return rawUtxos.map((u) => ({
+        tx_hash: u.txid,
+        tx_pos: u.vout,
+        value: u.value,
+        height: u.status.block_height ?? 0
+      }));
+    }
+    async getHistory(address) {
+      const txs = await this.fetchJson(`/address/${address}/txs`);
+      return txs.map((tx) => ({
+        tx_hash: tx.txid,
+        height: tx.status.block_height ?? 0
+      }));
+    }
+    async getTransaction(txHash) {
+      return this.fetchText(`/tx/${txHash}/hex`);
+    }
+    async broadcast(rawTx) {
+      const response = await native.net.fetch(`${this.baseUrl}/tx`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: rawTx
+      });
+      const bodyStr = response.body ? native.encoding.utf8Decode(response.body) : "";
+      if (response.status !== 200) {
+        throw new Error(`Broadcast failed (status ${response.status}): ${bodyStr}`);
+      }
+      return bodyStr.trim();
+    }
+    async estimateFee(blocks) {
+      const data = await this.fetchJson("/v1/fees/recommended");
+      let satPerVb;
+      if (blocks <= 1) {
+        satPerVb = data.fastestFee;
+      } else if (blocks <= 3) {
+        satPerVb = data.halfHourFee;
+      } else if (blocks <= 6) {
+        satPerVb = data.hourFee;
+      } else {
+        satPerVb = data.economyFee;
+      }
+      return satPerVb * 1e3 / 1e8;
+    }
+    // ── Private helpers ──────────────────────────────────────────────────────
+    async fetchJson(path) {
+      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      if (response.status !== 200) {
+        const body = response.body ? native.encoding.utf8Decode(response.body) : "";
+        throw new Error(
+          `Mempool API error: status ${response.status} for ${path}: ${body}`
+        );
+      }
+      const bodyText = response.body ? native.encoding.utf8Decode(response.body) : "";
+      return JSON.parse(bodyText);
+    }
+    async fetchText(path) {
+      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      if (response.status !== 200) {
+        const body = response.body ? native.encoding.utf8Decode(response.body) : "";
+        throw new Error(
+          `Mempool API error: status ${response.status} for ${path}: ${body}`
+        );
+      }
+      return response.body ? native.encoding.utf8Decode(response.body) : "";
+    }
+  };
+
+  // ../wdk-v2-wallet-btc/src/client/index.ts
+  function createClient(descOrClient, network = "bitcoin") {
+    if (descOrClient && typeof descOrClient === "object" && "getBalance" in descOrClient && "listUnspent" in descOrClient && "broadcast" in descOrClient) {
+      return descOrClient;
+    }
+    const desc = descOrClient;
+    const net = desc.network ?? network;
+    switch (desc.type) {
+      case "blockbook":
+        return new BlockbookClient(net, desc.url);
+      case "mempool-rest":
+        return new MempoolRestClient(net, desc.url);
+      default:
+        throw new Error(`Unknown BTC client type: ${desc.type}`);
+    }
+  }
+
+  // ../wdk-v2-wallet-btc/src/btc-wallet.ts
+  var BitcoinWallet = class extends BaseWallet {
+    constructor() {
+      super("btc", 0, "secp256k1");
+      this.isTestnet = false;
+      this.network = "bitcoin";
+    }
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+    async initialize(config) {
+      await super.initialize(config);
+      this.network = config.network ?? (config.isTestnet ? "testnet" : "bitcoin");
+      this.isTestnet = this.network !== "bitcoin";
+      this.coinType = this.network === "bitcoin" ? 0 : 1;
+      if (config.btcClient) {
+        this.client = createClient(config.btcClient, this.network);
+      } else {
+        this.client = new MempoolRestClient(this.network);
+      }
+      await this.client.connect();
+    }
+    /**
+     * BTC native SegWit (P2WPKH) uses BIP-84: m/84'/coinType'/account'/change/index
+     * coinType is set dynamically in initialize(): 0 for mainnet, 1 for testnet.
+     */
+    getDerivationPath(index) {
+      return `m/84'/${this.coinType}'/0'/0/${index}`;
+    }
+    // -----------------------------------------------------------------------
+    // Address
+    // -----------------------------------------------------------------------
+    async getAddress(keyHandle, _index) {
+      return generateSegwitAddress(keyHandle, this.isTestnet);
+    }
+    // -----------------------------------------------------------------------
+    // Balance
+    // -----------------------------------------------------------------------
+    /**
+     * Fetch the confirmed balance for a Bitcoin address (in satoshis).
+     * Delegates to IBtcClient.getBalance().
+     */
+    async getBalance(address) {
+      const balance = await this.client.getBalance(address);
+      return String(balance.confirmed);
+    }
+    // -----------------------------------------------------------------------
+    // Build transaction
+    // -----------------------------------------------------------------------
+    /**
+     * Build an unsigned Bitcoin transaction.
+     *
+     * Steps:
+     *   1. Fetch UTXOs via IBtcClient.listUnspent()
+     *   2. Estimate fees via IBtcClient.estimateFee()
+     *   3. Select coins
+     *   4. Construct the unsigned transaction envelope
+     */
+    async buildTransaction(params) {
+      const { to, amount } = params;
+      const targetSats = parseInt(amount, 10);
+      if (isNaN(targetSats) || targetSats <= 0) {
+        throw new Error(`Invalid amount: ${amount}`);
+      }
+      const fromAddress = params.from;
+      if (!fromAddress) {
+        throw new Error(
+          "Sender address must be provided in params.from for BTC transactions"
+        );
+      }
+      const electrumUtxos = await this.client.listUnspent(fromAddress);
+      const utxos = electrumUtxos.map((u) => ({
+        txid: u.tx_hash,
+        vout: u.tx_pos,
+        value: u.value,
+        scriptPubKey: "",
+        address: fromAddress,
+        confirmations: u.height > 0 ? 1 : 0
+      }));
+      if (utxos.length === 0) {
+        throw new Error("No UTXOs available for address");
+      }
+      const btcPerKb = await this.client.estimateFee(3);
+      const feeRate = Math.ceil(btcPerKb * 1e8 / 1e3);
+      const selection = selectUtxos(utxos, targetSats, feeRate);
+      if (!selection) {
+        throw new Error("Insufficient funds");
+      }
+      const inputs = selection.selected.map((u) => ({
+        txid: u.txid,
+        vout: u.vout,
+        value: u.value,
+        scriptPubKey: u.scriptPubKey
+      }));
+      const outputs = [
+        { address: to, value: targetSats }
+      ];
+      if (selection.change > 0) {
+        outputs.push({ address: fromAddress, value: selection.change });
+      }
+      const btcUnsignedTx = {
+        inputs,
+        outputs,
+        changeAddress: fromAddress,
+        fee: selection.fee
+      };
+      return {
+        chain: "btc",
+        data: btcUnsignedTx,
+        estimatedFee: String(selection.fee)
+      };
+    }
+    // -----------------------------------------------------------------------
+    // Sign transaction
+    // -----------------------------------------------------------------------
+    async signTransaction(tx, keyHandle) {
+      const btcTx = tx.data;
+      const keyHandles = btcTx.inputs.map(() => keyHandle);
+      const signed = buildTransaction(btcTx.inputs, btcTx.outputs, keyHandles);
+      return {
+        chain: "btc",
+        rawTx: signed.rawTx,
+        txHash: signed.txid
+      };
+    }
+    // -----------------------------------------------------------------------
+    // Broadcast
+    // -----------------------------------------------------------------------
+    /**
+     * Broadcast a signed transaction to the Bitcoin network.
+     * Delegates to IBtcClient.broadcast().
+     */
+    async broadcastTransaction(tx) {
+      const rawTx = typeof tx.rawTx === "string" ? tx.rawTx : native.encoding.hexEncode(tx.rawTx);
+      return this.client.broadcast(rawTx);
+    }
+    // -----------------------------------------------------------------------
+    // Transaction history
+    // -----------------------------------------------------------------------
+    /**
+     * Fetch transaction history for an address.
+     * Uses IBtcClient.getHistory() for tx list.
+     *
+     * Note: IBtcClient.getHistory() returns minimal data ({tx_hash, height}).
+     * For rich detail (from/to/amount), we return what's available.
+     * MempoolRestClient's getHistory includes all txids; a future enhancement
+     * can fetch individual tx details via client.getTransaction().
+     */
+    async getTransactionHistory(address, limit = 25) {
+      const entries = await this.client.getHistory(address);
+      return entries.slice(0, limit).map((entry) => ({
+        txHash: entry.tx_hash,
+        chain: "btc",
+        from: "",
+        to: address,
+        amount: "0",
+        timestamp: 0,
+        status: entry.height > 0 ? "confirmed" : "pending",
+        blockNumber: entry.height > 0 ? entry.height : void 0
+      }));
+    }
+    // -----------------------------------------------------------------------
+    // Cleanup
+    // -----------------------------------------------------------------------
+    destroy() {
+      if (this.client) {
+        this.client.close().catch(() => {
+        });
+      }
+      super.destroy();
+    }
+  };
+
+  // src/bundle-entry.ts
+  var engine = new WDKEngine();
+  var btcWallet = new BitcoinWallet();
+  engine.registerChain(btcWallet);
+  var wdk = {
+    // ── Lifecycle ──
+    createWallet(params) {
+      return engine.createWallet(params);
+    },
+    unlockWallet(params) {
+      return engine.unlockWallet(params);
+    },
+    lockWallet() {
+      return engine.lockWallet();
+    },
+    destroyWallet() {
+      return engine.destroyWallet();
+    },
+    getState() {
+      return engine.getState();
+    },
+    // ── BTC-specific convenience functions ──
+    /**
+     * Derive a BTC SegWit address at the given index.
+     * Requires the wallet to already be unlocked (state === 'ready').
+     * Throws StateError if called before unlockWallet().
+     */
+    getBtcAddress(params) {
+      const index = params.index ?? 0;
+      const btcConfig = engine.getConfig().networks["btc"];
+      const coinType = btcConfig?.isTestnet ? 1 : 0;
+      const keyHandle = engine.getKeyManager().deriveAndTrack(
+        `m/84'/${coinType}'/0'/0/${index}`
+      );
+      const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+      const sha = native.crypto.sha256(pubkey);
+      const hash160 = native.crypto.ripemd160(sha);
+      const fiveBit = convertBits2(hash160, 8, 5, true);
+      if (!fiveBit) return { error: "bit conversion failed" };
+      const witnessProgram = new Uint8Array(1 + fiveBit.length);
+      witnessProgram[0] = 0;
+      witnessProgram.set(fiveBit, 1);
+      const hrp = btcConfig?.isTestnet ? "tb" : "bc";
+      const address = native.encoding.bech32Encode(hrp, witnessProgram);
+      return { address };
+    },
+    // ── Configuration ──
+    /**
+     * Update network configuration before unlockWallet().
+     * Pass { isTestnet: true } to switch a chain to testnet.
+     * Pass { chain: 'btc', isTestnet: true } to target a specific chain
+     * (defaults to 'btc' if chain is omitted).
+     */
+    configure(params) {
+      const chain = params.chain ?? "btc";
+      const isTestnet = params.isTestnet ?? (params.network === "testnet" || params.network === "regtest");
+      const network = params.network ?? (isTestnet ? "testnet" : "bitcoin");
+      engine.configure({
+        networks: {
+          [chain]: {
+            chainId: chain,
+            networkId: isTestnet ? "testnet" : "mainnet",
+            rpcUrl: "",
+            isTestnet,
+            network,
+            btcClient: params.btcClient
+          }
+        }
+      });
+      return {};
+    },
+    // ── Generic chain dispatch ──
+    getAddress(params) {
+      return engine.dispatch("getAddress", params);
+    },
+    getBalance(params) {
+      return engine.dispatch("getBalance", params);
+    },
+    send(params) {
+      return engine.dispatch("send", params);
+    },
+    getHistory(params) {
+      return engine.dispatch("getHistory", params);
+    }
+  };
+  function convertBits2(data, fromBits, toBits, pad) {
+    let acc = 0;
+    let bits = 0;
+    const ret = [];
+    const maxv = (1 << toBits) - 1;
+    for (let i = 0; i < data.length; i++) {
+      const value = data[i];
+      if (value < 0 || value >> fromBits !== 0) return null;
+      acc = acc << fromBits | value;
+      bits += fromBits;
+      while (bits >= toBits) {
+        bits -= toBits;
+        ret.push(acc >> bits & maxv);
+      }
+    }
+    if (pad) {
+      if (bits > 0) {
+        ret.push(acc << toBits - bits & maxv);
+      }
+    } else if (bits >= fromBits || (acc << toBits - bits & maxv) !== 0) {
+      return null;
+    }
+    return new Uint8Array(ret);
+  }
+  globalThis.wdk = wdk;
+})();
