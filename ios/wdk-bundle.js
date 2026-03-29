@@ -447,7 +447,7 @@ var __wdk_exports = (() => {
     }
     return new Uint8Array(result);
   }
-  function generateSegwitAddress(keyHandle, isTestnet = false) {
+  function generateSegwitAddress(keyHandle, isTestnet = false, network) {
     const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
     const sha = native.crypto.sha256(pubkey);
     const hash160 = native.crypto.ripemd160(sha);
@@ -455,7 +455,7 @@ var __wdk_exports = (() => {
     if (!data5) {
       throw new Error("Failed to convert pubkey hash to 5-bit groups");
     }
-    const hrp = isTestnet ? "tb" : "bc";
+    const hrp = network === "regtest" ? "bcrt" : isTestnet ? "tb" : "bc";
     const witnessData = new Uint8Array(1 + data5.length);
     witnessData[0] = 0;
     witnessData.set(data5, 1);
@@ -1146,6 +1146,20 @@ var __wdk_exports = (() => {
       this.txCache.set(txHash, hex);
       return hex;
     }
+    /**
+     * Get transaction confirmation status via mempool.space /tx/{txid} endpoint.
+     * Used by btc-wallet's getTransactionReceipt().
+     */
+    async getTxStatus(txHash) {
+      const data = await this.fetchJson(`/tx/${txHash}`);
+      return {
+        txHash: data.txid,
+        confirmed: data.status.confirmed,
+        blockHeight: data.status.block_height ?? 0,
+        blockTime: data.status.block_time ?? 0,
+        fee: data.fee
+      };
+    }
     async broadcast(rawTx) {
       const response = await native.net.fetch(`${this.baseUrl}/tx`, {
         method: "POST",
@@ -1255,7 +1269,7 @@ var __wdk_exports = (() => {
     // Address
     // -----------------------------------------------------------------------
     async getAddress(keyHandle, _index) {
-      return generateSegwitAddress(keyHandle, this.isTestnet);
+      return generateSegwitAddress(keyHandle, this.isTestnet, this.network);
     }
     // -----------------------------------------------------------------------
     // Balance
@@ -1475,6 +1489,26 @@ var __wdk_exports = (() => {
         status: tx.confirmed ? "confirmed" : "pending",
         blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
       }));
+    }
+    // -----------------------------------------------------------------------
+    // Transaction receipt
+    // -----------------------------------------------------------------------
+    /**
+     * Get the confirmation status of a transaction.
+     * Matches production WDK's getTransactionReceipt().
+     */
+    async getTransactionReceipt(txHash) {
+      if (typeof this.client.getTxStatus === "function") {
+        return this.client.getTxStatus(txHash);
+      }
+      const rawHex = await this.client.getTransaction(txHash);
+      return {
+        txHash,
+        confirmed: rawHex.length > 0,
+        blockHeight: 0,
+        blockTime: 0,
+        fee: 0
+      };
     }
     // -----------------------------------------------------------------------
     // Cleanup
