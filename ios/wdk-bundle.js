@@ -825,6 +825,41 @@ var __wdk_exports = (() => {
     };
   }
 
+  // ../wdk-v2-wallet-btc/src/cache.ts
+  var LRUCache = class {
+    constructor(maxSize = 100) {
+      this.maxSize = maxSize;
+      this.cache = /* @__PURE__ */ new Map();
+    }
+    get(key) {
+      const value = this.cache.get(key);
+      if (value !== void 0) {
+        this.cache.delete(key);
+        this.cache.set(key, value);
+      }
+      return value;
+    }
+    set(key, value) {
+      this.cache.delete(key);
+      this.cache.set(key, value);
+      if (this.cache.size > this.maxSize) {
+        const firstKey = this.cache.keys().next().value;
+        if (firstKey !== void 0) {
+          this.cache.delete(firstKey);
+        }
+      }
+    }
+    has(key) {
+      return this.cache.has(key);
+    }
+    clear() {
+      this.cache.clear();
+    }
+    get size() {
+      return this.cache.size;
+    }
+  };
+
   // ../wdk-v2-wallet-btc/src/client/blockbook-client.ts
   var BASE_URLS = {
     bitcoin: "https://btc1.trezor.io",
@@ -835,6 +870,7 @@ var __wdk_exports = (() => {
   var MEMPOOL_FEE_URL = "https://mempool.space/api/v1/fees/recommended";
   var BlockbookClient = class {
     constructor(network = "bitcoin", customUrl) {
+      this.txCache = new LRUCache(100);
       this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS[network];
       if (!this.baseUrl) {
         throw new Error(
@@ -845,6 +881,7 @@ var __wdk_exports = (() => {
     async connect() {
     }
     async close() {
+      this.txCache.clear();
     }
     async reconnect() {
     }
@@ -884,10 +921,13 @@ var __wdk_exports = (() => {
       return entries;
     }
     async getTransaction(txHash) {
+      const cached = this.txCache.get(txHash);
+      if (cached !== void 0) return cached;
       const data = await this.fetchJson(`/api/v2/tx/${txHash}`);
       if (!data.hex) {
         throw new Error(`No hex data in Blockbook response for tx ${txHash}`);
       }
+      this.txCache.set(txHash, data.hex);
       return data.hex;
     }
     async broadcast(rawTx) {
@@ -1009,13 +1049,17 @@ var __wdk_exports = (() => {
   };
   var MempoolRestClient = class {
     constructor(network = "bitcoin", customUrl) {
+      /** LRU cache for raw transaction hex (avoids re-fetching same tx) */
+      this.txCache = new LRUCache(100);
       this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS2[network];
     }
     async connect() {
     }
     async close() {
+      this.txCache.clear();
     }
     async reconnect() {
+      this.txCache.clear();
     }
     async getBalance(address) {
       const data = await this.fetchJson(`/address/${address}`);
@@ -1096,7 +1140,11 @@ var __wdk_exports = (() => {
       });
     }
     async getTransaction(txHash) {
-      return this.fetchText(`/tx/${txHash}/hex`);
+      const cached = this.txCache.get(txHash);
+      if (cached !== void 0) return cached;
+      const hex = await this.fetchText(`/tx/${txHash}/hex`);
+      this.txCache.set(txHash, hex);
+      return hex;
     }
     async broadcast(rawTx) {
       const response = await native.net.fetch(`${this.baseUrl}/tx`, {
@@ -1156,10 +1204,19 @@ var __wdk_exports = (() => {
     const desc = descOrClient;
     const net = desc.network ?? network;
     switch (desc.type) {
+      // Production-compatible descriptors
+      case "blockbook-http":
       case "blockbook":
         return new BlockbookClient(net, desc.url);
       case "mempool-rest":
         return new MempoolRestClient(net, desc.url);
+      // Production Electrum descriptors — not yet implemented, but recognized
+      // so config doesn't silently break when switching from production
+      case "electrum":
+      case "electrum-ws":
+        throw new Error(
+          `BTC client type "${desc.type}" is recognized but not yet implemented in v2. Use "blockbook-http" or "mempool-rest" instead.`
+        );
       default:
         throw new Error(`Unknown BTC client type: ${desc.type}`);
     }
@@ -1427,6 +1484,8 @@ var __wdk_exports = (() => {
         this.client.close().catch(() => {
         });
       }
+      this.network = "bitcoin";
+      this.isTestnet = false;
       super.destroy();
     }
   };
