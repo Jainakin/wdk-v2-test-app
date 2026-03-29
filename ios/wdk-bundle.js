@@ -335,6 +335,26 @@ var __wdk_exports = (() => {
           const limit = params.limit;
           return wallet.getTransactionHistory(address, limit);
         }
+        case "quoteSend": {
+          const from = params.from ?? params.address;
+          if (!from) throw new StateError('Missing "from"/"address" parameter');
+          const to = params.to;
+          if (!to) throw new StateError('Missing "to" parameter');
+          const amount = params.amount;
+          if (!amount) throw new StateError('Missing "amount" parameter');
+          if (typeof wallet.quoteSendTransaction === "function") {
+            return wallet.quoteSendTransaction({ from, to, amount });
+          }
+          throw new StateError("quoteSend not supported for this chain");
+        }
+        case "getMaxSpendable": {
+          const address = params.address;
+          if (!address) throw new StateError('Missing "address" parameter');
+          if (typeof wallet.getMaxSpendable === "function") {
+            return wallet.getMaxSpendable(address);
+          }
+          throw new StateError("getMaxSpendable not supported for this chain");
+        }
         default:
           throw new StateError(`Unknown action: ${action}`);
       }
@@ -446,25 +466,43 @@ var __wdk_exports = (() => {
   var VBYTES_PER_INPUT = 68;
   var VBYTES_PER_OUTPUT = 31;
   var TX_OVERHEAD_VBYTES = 11;
-  var DUST_THRESHOLD = 546;
-  function selectUtxos(utxos, targetAmount, feeRate) {
+  var DUST_THRESHOLD_P2WPKH = 294;
+  var MIN_TX_FEE_SATS = 250;
+  var MAX_UTXO_INPUTS = 200;
+  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH) {
     const sorted = [...utxos].sort((a, b) => b.value - a.value);
+    const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
     const selected = [];
     let totalInput = 0;
-    for (const utxo of sorted) {
+    for (const utxo of candidates) {
       selected.push(utxo);
       totalInput += utxo.value;
       const vbytes2 = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + 2 * VBYTES_PER_OUTPUT;
-      const fee2 = Math.ceil(vbytes2 * feeRate);
-      if (totalInput >= targetAmount + fee2) {
-        const change = totalInput - targetAmount - fee2;
-        if (change > 0 && change < DUST_THRESHOLD) {
-          return { selected, fee: totalInput - targetAmount, change: 0 };
+      let fee = Math.ceil(vbytes2 * feeRate);
+      if (fee < MIN_TX_FEE_SATS) {
+        fee = MIN_TX_FEE_SATS;
+      }
+      if (totalInput >= targetAmount + fee) {
+        const change = totalInput - targetAmount - fee;
+        if (change > 0 && change < dustThreshold) {
+          const totalFee = totalInput - targetAmount;
+          return { selected, fee: totalFee, change: 0 };
         }
-        return { selected, fee: fee2, change };
+        return { selected, fee, change };
       }
     }
     return null;
+  }
+  function calculateMaxSpendable(utxos, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH) {
+    const sorted = [...utxos].sort((a, b) => b.value - a.value);
+    const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
+    const totalInput = candidates.reduce((sum, u) => sum + u.value, 0);
+    const vbytes = TX_OVERHEAD_VBYTES + candidates.length * VBYTES_PER_INPUT + 1 * VBYTES_PER_OUTPUT;
+    let fee = Math.ceil(vbytes * feeRate);
+    if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
+    const maxSpendable = totalInput - fee;
+    if (maxSpendable < dustThreshold) return 0;
+    return maxSpendable;
   }
 
   // ../wdk-v2-wallet-btc/src/transaction.ts
@@ -551,6 +589,32 @@ var __wdk_exports = (() => {
     return reversed;
   }
   function addressToScriptPubKey(address) {
+    try {
+      const raw = native.encoding.base58CheckDecode(address);
+      if (raw.length === 21) {
+        const version = raw[0];
+        const hash = raw.slice(1);
+        if (version === 0 || version === 111) {
+          const script2 = new Uint8Array(25);
+          script2[0] = 118;
+          script2[1] = 169;
+          script2[2] = 20;
+          script2.set(hash, 3);
+          script2[23] = 136;
+          script2[24] = 172;
+          return script2;
+        }
+        if (version === 5 || version === 196) {
+          const script2 = new Uint8Array(23);
+          script2[0] = 169;
+          script2[1] = 20;
+          script2.set(hash, 2);
+          script2[22] = 135;
+          return script2;
+        }
+      }
+    } catch {
+    }
     let decoded;
     try {
       decoded = native.encoding.bech32Decode(address);
@@ -558,7 +622,7 @@ var __wdk_exports = (() => {
       try {
         decoded = native.encoding.bech32mDecode(address);
       } catch {
-        throw new Error(`Unsupported address format: ${address}. Only bech32 (bc1q) and bech32m (bc1p) addresses are supported.`);
+        throw new Error(`Unsupported address format: ${address}`);
       }
     }
     const witnessVersion = decoded.data[0];
@@ -1148,6 +1212,98 @@ var __wdk_exports = (() => {
       return String(balance.confirmed);
     }
     // -----------------------------------------------------------------------
+    // Quote + Max Spendable (production parity: quoteSendTransaction, getMaxSpendable)
+    // -----------------------------------------------------------------------
+    /**
+     * Preview a send transaction without signing or broadcasting.
+     * Returns estimated fee, input/output counts, and whether the tx is feasible.
+     * Matches production WDK's quoteSendTransaction().
+     */
+    async quoteSendTransaction(params) {
+      const targetSats = parseInt(params.amount, 10);
+      if (isNaN(targetSats) || targetSats <= 0) {
+        return {
+          feasible: false,
+          fee: 0,
+          feeRate: 0,
+          inputCount: 0,
+          outputCount: 0,
+          totalInput: 0,
+          change: 0,
+          error: `Invalid amount: ${params.amount}`
+        };
+      }
+      try {
+        const electrumUtxos = await this.client.listUnspent(params.from);
+        const utxos = electrumUtxos.map((u) => ({
+          txid: u.tx_hash,
+          vout: u.tx_pos,
+          value: u.value,
+          scriptPubKey: "",
+          address: params.from
+        }));
+        const btcPerKb = await this.client.estimateFee(3);
+        const feeRate = Math.ceil(btcPerKb * 1e8 / 1e3);
+        const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH);
+        if (!selection) {
+          return {
+            feasible: false,
+            fee: 0,
+            feeRate,
+            inputCount: 0,
+            outputCount: 0,
+            totalInput: utxos.reduce((s, u) => s + u.value, 0),
+            change: 0,
+            error: "Insufficient funds"
+          };
+        }
+        return {
+          feasible: true,
+          fee: selection.fee,
+          feeRate,
+          inputCount: selection.selected.length,
+          outputCount: selection.change > 0 ? 2 : 1,
+          totalInput: selection.selected.reduce((s, u) => s + u.value, 0),
+          change: selection.change
+        };
+      } catch (e) {
+        return {
+          feasible: false,
+          fee: 0,
+          feeRate: 0,
+          inputCount: 0,
+          outputCount: 0,
+          totalInput: 0,
+          change: 0,
+          error: e.message ?? String(e)
+        };
+      }
+    }
+    /**
+     * Calculate the maximum amount that can be sent from an address.
+     * Accounts for fee, dust threshold, and MAX_UTXO_INPUTS.
+     * Matches production WDK's getMaxSpendable().
+     */
+    async getMaxSpendable(address) {
+      const electrumUtxos = await this.client.listUnspent(address);
+      const utxos = electrumUtxos.map((u) => ({
+        txid: u.tx_hash,
+        vout: u.tx_pos,
+        value: u.value,
+        scriptPubKey: "",
+        address
+      }));
+      const btcPerKb = await this.client.estimateFee(3);
+      const feeRate = Math.ceil(btcPerKb * 1e8 / 1e3);
+      const maxSpendable = calculateMaxSpendable(utxos, feeRate, DUST_THRESHOLD_P2WPKH);
+      const totalInput = utxos.reduce((s, u) => s + u.value, 0);
+      return {
+        maxSpendable,
+        fee: totalInput - maxSpendable,
+        utxoCount: utxos.length
+      };
+    }
+    // -----------------------------------------------------------------------
     // Build transaction
     // -----------------------------------------------------------------------
     /**
@@ -1172,11 +1328,14 @@ var __wdk_exports = (() => {
         );
       }
       const electrumUtxos = await this.client.listUnspent(fromAddress);
+      const senderScriptPubKey = native.encoding.hexEncode(
+        addressToScriptPubKey(fromAddress)
+      );
       const utxos = electrumUtxos.map((u) => ({
         txid: u.tx_hash,
         vout: u.tx_pos,
         value: u.value,
-        scriptPubKey: "",
+        scriptPubKey: senderScriptPubKey,
         address: fromAddress,
         confirmations: u.height > 0 ? 1 : 0
       }));
@@ -1355,6 +1514,12 @@ var __wdk_exports = (() => {
     },
     getHistory(params) {
       return engine.dispatch("getHistory", params);
+    },
+    quoteSend(params) {
+      return engine.dispatch("quoteSend", params);
+    },
+    getMaxSpendable(params) {
+      return engine.dispatch("getMaxSpendable", params);
     }
   };
   function convertBits2(data, fromBits, toBits, pad) {

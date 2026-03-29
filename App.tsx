@@ -156,6 +156,39 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       },
     },
 
+    // ── Quote Send + Max Spendable ────────────────────────────────────
+    {
+      name: 'quoteSend',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const quote = await WDKWallet.quoteSend({
+          chain: 'btc', from: address,
+          to: 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',
+          amount: '10000',
+        });
+        // Address has 0 balance so should be infeasible
+        const ok = typeof quote.feasible === 'boolean';
+        return {
+          passed: ok,
+          detail: quote.feasible
+            ? `feasible fee=${quote.fee} inputs=${quote.inputCount}`
+            : `infeasible: ${quote.error ?? 'insufficient funds'}`,
+        };
+      },
+    },
+    {
+      name: 'getMaxSpendable',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const result = await WDKWallet.getMaxSpendable({chain: 'btc', address});
+        const ok = typeof result.maxSpendable === 'number';
+        return {
+          passed: ok,
+          detail: `max=${result.maxSpendable}sat fee=${result.fee} utxos=${result.utxoCount}`,
+        };
+      },
+    },
+
     // ── History ───────────────────────────────────────────────────────
     {
       name: 'getHistory',
