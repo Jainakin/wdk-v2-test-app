@@ -180,12 +180,15 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
         const tx = txs[0] as any;
         const hasHash = typeof tx.txHash === 'string' && tx.txHash.length > 0;
         const hasStatus = tx.status === 'confirmed' || tx.status === 'pending';
-        const ok = hasHash && hasStatus;
+        const hasDirection = tx.direction === 'sent' || tx.direction === 'received' || tx.direction === 'self';
+        const hasAmount = typeof tx.amount === 'string' && tx.amount !== '0';
+        const hasTimestamp = typeof tx.timestamp === 'number';
+        const ok = hasHash && hasStatus && hasDirection && hasTimestamp;
         return {
           passed: ok,
           detail: ok
-            ? `txHash=${tx.txHash.slice(0, 12)}... status=${tx.status}`
-            : `bad shape: ${JSON.stringify(tx).slice(0, 100)}`,
+            ? `${tx.direction} ${tx.amount}sat fee=${tx.fee ?? '?'} ${tx.txHash.slice(0, 10)}...`
+            : `missing fields: hash=${hasHash} status=${hasStatus} dir=${hasDirection} amt=${hasAmount} ts=${hasTimestamp} raw=${JSON.stringify(tx).slice(0, 80)}`,
         };
       },
     },

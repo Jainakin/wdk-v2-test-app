@@ -26,6 +26,8 @@ var __wdk_exports = (() => {
     constructor() {
       this.handles = /* @__PURE__ */ new Set();
       this.seedHandle = null;
+      /** Cache: derivation path → key handle (avoids re-deriving the same key) */
+      this.derivedCache = /* @__PURE__ */ new Map();
     }
     /** Track a key handle (returned by native.crypto.deriveKey etc.) */
     track(handle) {
@@ -37,6 +39,12 @@ var __wdk_exports = (() => {
       if (this.handles.has(handle)) {
         native.crypto.releaseKey(handle);
         this.handles.delete(handle);
+        for (const [path, h] of this.derivedCache) {
+          if (h === handle) {
+            this.derivedCache.delete(path);
+            break;
+          }
+        }
       }
     }
     /** Set the master seed handle. Releases the previous handle if one is already tracked. */
@@ -55,10 +63,20 @@ var __wdk_exports = (() => {
       }
       return this.seedHandle;
     }
-    /** Derive a key from seed at a BIP-44 path and track it */
+    /**
+     * Derive a key from seed at a BIP path and cache it.
+     * Returns the cached handle if the same path was already derived.
+     * This prevents handle leaks from repeated getAddress/send calls.
+     */
     deriveAndTrack(path) {
+      const cached = this.derivedCache.get(path);
+      if (cached !== void 0 && this.handles.has(cached)) {
+        return cached;
+      }
       const handle = native.crypto.deriveKey(this.getSeedHandle(), path);
-      return this.track(handle);
+      this.handles.add(handle);
+      this.derivedCache.set(path, handle);
+      return handle;
     }
     /** Release ALL tracked handles including seed. Called on lock/destroy. */
     releaseAll() {
@@ -66,6 +84,7 @@ var __wdk_exports = (() => {
         native.crypto.releaseKey(handle);
       }
       this.handles.clear();
+      this.derivedCache.clear();
       this.seedHandle = null;
     }
     /** Number of active handles */
@@ -226,7 +245,7 @@ var __wdk_exports = (() => {
       return { mnemonic };
     }
     /** Unlock wallet with mnemonic — derives seed and master key */
-    unlockWallet(params) {
+    async unlockWallet(params) {
       if (this.state === "destroyed") {
         throw new StateError("Wallet has been destroyed and cannot be reused");
       }
@@ -242,7 +261,7 @@ var __wdk_exports = (() => {
         const networkKey = `${wallet.chainId}:${this.config.defaultNetwork}`;
         const networkConfig = this.config.networks[networkKey] || this.config.networks[wallet.chainId];
         if (networkConfig) {
-          wallet.initialize(networkConfig);
+          await wallet.initialize(networkConfig);
         }
       }
       this.state = "ready";
@@ -814,6 +833,63 @@ var __wdk_exports = (() => {
       }
       return data.result ?? "";
     }
+    async getDetailedHistory(address, limit = 25) {
+      const data = await this.fetchJson(`/api/v2/address/${address}?details=txs&pageSize=${limit}`);
+      if (!data.transactions) return [];
+      return data.transactions.map((tx) => {
+        const inputAddresses = new Set(
+          tx.vin.flatMap((v) => v.addresses ?? [])
+        );
+        const outputAddresses = new Set(
+          tx.vout.flatMap((v) => v.addresses ?? [])
+        );
+        const isInInput = inputAddresses.has(address);
+        const isInOutput = outputAddresses.has(address);
+        let direction;
+        if (isInInput && isInOutput) {
+          const allToUs = tx.vout.every(
+            (v) => !v.addresses || v.addresses.every((a) => a === address)
+          );
+          direction = allToUs ? "self" : "sent";
+        } else if (isInInput) {
+          direction = "sent";
+        } else {
+          direction = "received";
+        }
+        let amount;
+        if (direction === "received") {
+          amount = tx.vout.filter((v) => v.addresses?.includes(address)).reduce((sum, v) => sum + parseInt(v.value, 10), 0);
+        } else if (direction === "sent") {
+          const totalIn = tx.vin.filter((v) => v.addresses?.includes(address)).reduce((sum, v) => sum + parseInt(v.value, 10), 0);
+          const changeBack = tx.vout.filter((v) => v.addresses?.includes(address)).reduce((sum, v) => sum + parseInt(v.value, 10), 0);
+          amount = -(totalIn - changeBack);
+        } else {
+          amount = 0;
+        }
+        const counterparties = [];
+        if (direction === "sent") {
+          tx.vout.forEach((v) => {
+            (v.addresses ?? []).forEach((a) => {
+              if (a !== address) counterparties.push(a);
+            });
+          });
+        } else if (direction === "received") {
+          inputAddresses.forEach((a) => {
+            if (a !== address) counterparties.push(a);
+          });
+        }
+        return {
+          txHash: tx.txid,
+          direction,
+          amount,
+          fee: parseInt(tx.fees, 10) || 0,
+          timestamp: tx.blockTime ?? 0,
+          blockHeight: tx.blockHeight ?? 0,
+          confirmed: tx.confirmations > 0,
+          counterparties
+        };
+      });
+    }
     async estimateFee(blocks) {
       try {
         const data = await this.fetchJson(`/api/v2/estimatefee/${blocks}`);
@@ -898,6 +974,62 @@ var __wdk_exports = (() => {
         tx_hash: tx.txid,
         height: tx.status.block_height ?? 0
       }));
+    }
+    async getDetailedHistory(address, limit = 25) {
+      const txs = await this.fetchJson(`/address/${address}/txs`);
+      return txs.slice(0, limit).map((tx) => {
+        const inputAddresses = new Set(
+          tx.vin.filter((v) => v.prevout?.scriptpubkey_address).map((v) => v.prevout.scriptpubkey_address)
+        );
+        const outputAddresses = new Set(
+          tx.vout.filter((v) => v.scriptpubkey_address).map((v) => v.scriptpubkey_address)
+        );
+        const isInInput = inputAddresses.has(address);
+        const isInOutput = outputAddresses.has(address);
+        let direction;
+        if (isInInput && isInOutput) {
+          const allOutputsToUs = tx.vout.every(
+            (v) => !v.scriptpubkey_address || v.scriptpubkey_address === address
+          );
+          direction = allOutputsToUs ? "self" : "sent";
+        } else if (isInInput) {
+          direction = "sent";
+        } else {
+          direction = "received";
+        }
+        let amount;
+        if (direction === "received") {
+          amount = tx.vout.filter((v) => v.scriptpubkey_address === address).reduce((sum, v) => sum + v.value, 0);
+        } else if (direction === "sent") {
+          const totalIn = tx.vin.filter((v) => v.prevout?.scriptpubkey_address === address).reduce((sum, v) => sum + (v.prevout?.value ?? 0), 0);
+          const changeBack = tx.vout.filter((v) => v.scriptpubkey_address === address).reduce((sum, v) => sum + v.value, 0);
+          amount = -(totalIn - changeBack);
+        } else {
+          amount = 0;
+        }
+        const counterparties = [];
+        if (direction === "sent") {
+          tx.vout.forEach((v) => {
+            if (v.scriptpubkey_address && v.scriptpubkey_address !== address) {
+              counterparties.push(v.scriptpubkey_address);
+            }
+          });
+        } else if (direction === "received") {
+          inputAddresses.forEach((a) => {
+            if (a !== address) counterparties.push(a);
+          });
+        }
+        return {
+          txHash: tx.txid,
+          direction,
+          amount,
+          fee: tx.fee,
+          timestamp: tx.status.block_time ?? 0,
+          blockHeight: tx.status.block_height ?? 0,
+          confirmed: tx.status.confirmed,
+          counterparties
+        };
+      });
     }
     async getTransaction(txHash) {
       return this.fetchText(`/tx/${txHash}/hex`);
@@ -1109,25 +1241,23 @@ var __wdk_exports = (() => {
     // Transaction history
     // -----------------------------------------------------------------------
     /**
-     * Fetch transaction history for an address.
-     * Uses IBtcClient.getHistory() for tx list.
-     *
-     * Note: IBtcClient.getHistory() returns minimal data ({tx_hash, height}).
-     * For rich detail (from/to/amount), we return what's available.
-     * MempoolRestClient's getHistory includes all txids; a future enhancement
-     * can fetch individual tx details via client.getTransaction().
+     * Fetch transaction history with full parsed details.
+     * Uses IBtcClient.getDetailedHistory() which returns direction, amounts,
+     * fees, counterparties — parsed from full transaction data.
      */
     async getTransactionHistory(address, limit = 25) {
-      const entries = await this.client.getHistory(address);
-      return entries.slice(0, limit).map((entry) => ({
-        txHash: entry.tx_hash,
+      const detailed = await this.client.getDetailedHistory(address, limit);
+      return detailed.map((tx) => ({
+        txHash: tx.txHash,
         chain: "btc",
-        from: "",
-        to: address,
-        amount: "0",
-        timestamp: 0,
-        status: entry.height > 0 ? "confirmed" : "pending",
-        blockNumber: entry.height > 0 ? entry.height : void 0
+        from: tx.direction === "received" ? tx.counterparties[0] ?? "" : address,
+        to: tx.direction === "sent" ? tx.counterparties[0] ?? "" : address,
+        amount: String(Math.abs(tx.amount)),
+        fee: String(tx.fee),
+        direction: tx.direction,
+        timestamp: tx.timestamp,
+        status: tx.confirmed ? "confirmed" : "pending",
+        blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
       }));
     }
     // -----------------------------------------------------------------------
