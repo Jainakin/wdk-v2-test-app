@@ -11,8 +11,6 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
-		AA0002000000000000000001 /* WDKBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000001 /* WDKBridge.swift */; };
-		AA0002000000000000000002 /* WDKBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000002 /* WDKBridge.m */; };
 		AA0002000000000000000003 /* wdk-bundle.js in Resources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000003 /* wdk-bundle.js */; };
 		AB6F17B3DFFDFDD82DAE763D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
@@ -27,8 +25,6 @@
 		5DCACB8F33CDC322A6C60F78 /* libPods-WDKTestApp.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-WDKTestApp.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = WDKTestApp/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = WDKTestApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
-		AA0001000000000000000001 /* WDKBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WDKBridge.swift; sourceTree = "<group>"; };
-		AA0001000000000000000002 /* WDKBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WDKBridge.m; sourceTree = "<group>"; };
 		AA0001000000000000000003 /* wdk-bundle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "wdk-bundle.js"; sourceTree = "<group>"; };
 		AA0001000000000000000004 /* libwdk_all.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwdk_all.a; sourceTree = "<group>"; };
 		AA0001000000000000000005 /* WDKTestApp-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WDKTestApp-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -55,8 +51,6 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
-				AA0001000000000000000001 /* WDKBridge.swift */,
-				AA0001000000000000000002 /* WDKBridge.m */,
 				AA0001000000000000000003 /* wdk-bundle.js */,
 				AA0001000000000000000004 /* libwdk_all.a */,
 				AA0001000000000000000005 /* WDKTestApp-Bridging-Header.h */,
@@ -261,8 +255,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
-				AA0002000000000000000001 /* WDKBridge.swift in Sources */,
-				AA0002000000000000000002 /* WDKBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
