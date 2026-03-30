@@ -559,88 +559,6 @@ var __wdk_exports = (() => {
   }
 
   // ../wdk-v2-wallet-btc/src/transaction.ts
-  function writeUint32LE(value) {
-    const buf = new Uint8Array(4);
-    buf[0] = value & 255;
-    buf[1] = value >>> 8 & 255;
-    buf[2] = value >>> 16 & 255;
-    buf[3] = value >>> 24 & 255;
-    return buf;
-  }
-  function writeUint64LE(value) {
-    const buf = new Uint8Array(8);
-    buf[0] = value & 255;
-    buf[1] = value >>> 8 & 255;
-    buf[2] = value >>> 16 & 255;
-    buf[3] = value >>> 24 & 255;
-    const hi = Math.floor(value / 4294967296);
-    buf[4] = hi & 255;
-    buf[5] = hi >>> 8 & 255;
-    buf[6] = hi >>> 16 & 255;
-    buf[7] = hi >>> 24 & 255;
-    return buf;
-  }
-  function writeVarInt(value) {
-    if (value < 253) {
-      return new Uint8Array([value]);
-    } else if (value <= 65535) {
-      const buf = new Uint8Array(3);
-      buf[0] = 253;
-      buf[1] = value & 255;
-      buf[2] = value >>> 8 & 255;
-      return buf;
-    } else if (value <= 4294967295) {
-      const buf = new Uint8Array(5);
-      buf[0] = 254;
-      buf[1] = value & 255;
-      buf[2] = value >>> 8 & 255;
-      buf[3] = value >>> 16 & 255;
-      buf[4] = value >>> 24 & 255;
-      return buf;
-    } else {
-      const buf = new Uint8Array(9);
-      buf[0] = 255;
-      const lo = value & 4294967295;
-      const hi = Math.floor(value / 4294967296);
-      buf[1] = lo & 255;
-      buf[2] = lo >>> 8 & 255;
-      buf[3] = lo >>> 16 & 255;
-      buf[4] = lo >>> 24 & 255;
-      buf[5] = hi & 255;
-      buf[6] = hi >>> 8 & 255;
-      buf[7] = hi >>> 16 & 255;
-      buf[8] = hi >>> 24 & 255;
-      return buf;
-    }
-  }
-  function concat(...arrays) {
-    let totalLength = 0;
-    for (const arr of arrays) totalLength += arr.length;
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const arr of arrays) {
-      result.set(arr, offset);
-      offset += arr.length;
-    }
-    return result;
-  }
-  function appendByte(data, byte) {
-    const out = new Uint8Array(data.length + 1);
-    out.set(data);
-    out[data.length] = byte;
-    return out;
-  }
-  function hash256(data) {
-    return native.crypto.sha256(native.crypto.sha256(data));
-  }
-  function reverseTxid(txidHex) {
-    const bytes = native.encoding.hexDecode(txidHex);
-    const reversed = new Uint8Array(bytes.length);
-    for (let i = 0; i < bytes.length; i++) {
-      reversed[i] = bytes[bytes.length - 1 - i];
-    }
-    return reversed;
-  }
   function addressToScriptPubKey(address) {
     try {
       const raw = native.encoding.base58CheckDecode(address);
@@ -701,10 +619,86 @@ var __wdk_exports = (() => {
     }
     return new Uint8Array(result);
   }
-  function encodeDER(sig) {
-    if (sig.length !== 64) {
-      throw new Error(`Expected 64-byte signature, got ${sig.length}`);
+
+  // ../wdk-v2-wallet-btc/src/psbt.ts
+  var PSBT_MAGIC = new Uint8Array([112, 115, 98, 116, 255]);
+  function writeUint32LE(value) {
+    const buf = new Uint8Array(4);
+    buf[0] = value & 255;
+    buf[1] = value >>> 8 & 255;
+    buf[2] = value >>> 16 & 255;
+    buf[3] = value >>> 24 & 255;
+    return buf;
+  }
+  function writeUint64LE(value) {
+    const buf = new Uint8Array(8);
+    buf[0] = value & 255;
+    buf[1] = value >>> 8 & 255;
+    buf[2] = value >>> 16 & 255;
+    buf[3] = value >>> 24 & 255;
+    const hi = Math.floor(value / 4294967296);
+    buf[4] = hi & 255;
+    buf[5] = hi >>> 8 & 255;
+    buf[6] = hi >>> 16 & 255;
+    buf[7] = hi >>> 24 & 255;
+    return buf;
+  }
+  function writeVarInt(value) {
+    if (value < 253) return new Uint8Array([value]);
+    if (value <= 65535) {
+      const buf2 = new Uint8Array(3);
+      buf2[0] = 253;
+      buf2[1] = value & 255;
+      buf2[2] = value >>> 8 & 255;
+      return buf2;
     }
+    const buf = new Uint8Array(5);
+    buf[0] = 254;
+    buf[1] = value & 255;
+    buf[2] = value >>> 8 & 255;
+    buf[3] = value >>> 16 & 255;
+    buf[4] = value >>> 24 & 255;
+    return buf;
+  }
+  function concat(...arrays) {
+    let len = 0;
+    for (const a of arrays) len += a.length;
+    const result = new Uint8Array(len);
+    let off = 0;
+    for (const a of arrays) {
+      result.set(a, off);
+      off += a.length;
+    }
+    return result;
+  }
+  function reverseTxid(txidHex) {
+    const bytes = native.encoding.hexDecode(txidHex);
+    const reversed = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) reversed[i] = bytes[bytes.length - 1 - i];
+    return reversed;
+  }
+  function hash256(data) {
+    return native.crypto.sha256(native.crypto.sha256(data));
+  }
+  function appendByte(data, byte) {
+    const out = new Uint8Array(data.length + 1);
+    out.set(data);
+    out[data.length] = byte;
+    return out;
+  }
+  function encodeSignedInt(value) {
+    let start = 0;
+    while (start < value.length - 1 && value[start] === 0) start++;
+    const trimmed = value.slice(start);
+    if (trimmed[0] & 128) {
+      const padded = new Uint8Array(trimmed.length + 1);
+      padded[0] = 0;
+      padded.set(trimmed, 1);
+      return padded;
+    }
+    return trimmed;
+  }
+  function encodeDER(sig) {
     const r = sig.slice(0, 32);
     const s = sig.slice(32, 64);
     const encR = encodeSignedInt(r);
@@ -723,25 +717,52 @@ var __wdk_exports = (() => {
     der.set(encS, pos);
     return der;
   }
-  function encodeSignedInt(value) {
-    let start = 0;
-    while (start < value.length - 1 && value[start] === 0) {
-      start++;
-    }
-    const trimmed = value.slice(start);
-    if (trimmed[0] & 128) {
-      const padded = new Uint8Array(trimmed.length + 1);
-      padded[0] = 0;
-      padded.set(trimmed, 1);
-      return padded;
-    }
-    return trimmed;
+  function createPsbt(inputs, outputs) {
+    return {
+      unsignedTx: {
+        version: 2,
+        inputs,
+        outputs,
+        locktime: 0
+      },
+      inputs: inputs.map(() => ({
+        partialSigs: /* @__PURE__ */ new Map(),
+        sighashType: 1,
+        // SIGHASH_ALL
+        unknowns: /* @__PURE__ */ new Map()
+      })),
+      outputs: outputs.map(() => ({
+        unknowns: /* @__PURE__ */ new Map()
+      }))
+    };
   }
-  function computeSegwitSighash(inputs, outputs, inputIndex, keyHandle) {
-    const SIGHASH_ALL = 1;
-    const nVersion = writeUint32LE(2);
-    const nLockTime = writeUint32LE(0);
-    const nHashType = writeUint32LE(SIGHASH_ALL);
+  function addWitnessUtxo(psbt, inputIndex, amount, scriptPubKey) {
+    psbt.inputs[inputIndex].witnessUtxo = { amount, scriptPubKey };
+  }
+  function signInput(psbt, inputIndex, keyHandle) {
+    const { inputs, outputs } = psbt.unsignedTx;
+    const input = psbt.inputs[inputIndex];
+    if (input.witnessUtxo) {
+      const sighash = computeSegwitSighash(psbt, inputIndex, keyHandle);
+      const signature = native.crypto.signSecp256k1(keyHandle, sighash);
+      const derSig = encodeDER(signature);
+      const sigWithHashType = appendByte(derSig, input.sighashType);
+      const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+      input.partialSigs.set(native.encoding.hexEncode(pubkey), sigWithHashType);
+    } else if (input.nonWitnessUtxo) {
+      const sighash = computeLegacySighash(psbt, inputIndex, keyHandle);
+      const signature = native.crypto.signSecp256k1(keyHandle, sighash);
+      const derSig = encodeDER(signature);
+      const sigWithHashType = appendByte(derSig, input.sighashType);
+      const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+      input.partialSigs.set(native.encoding.hexEncode(pubkey), sigWithHashType);
+    } else {
+      throw new Error(`Input ${inputIndex} has no witnessUtxo or nonWitnessUtxo`);
+    }
+  }
+  function computeSegwitSighash(psbt, inputIndex, keyHandle) {
+    const { inputs, outputs, version, locktime } = psbt.unsignedTx;
+    const sighashType = psbt.inputs[inputIndex].sighashType;
     const outpoints = [];
     for (const inp of inputs) {
       outpoints.push(reverseTxid(inp.txid));
@@ -749,16 +770,14 @@ var __wdk_exports = (() => {
     }
     const hashPrevouts = hash256(concat(...outpoints));
     const sequences = [];
-    for (let i = 0; i < inputs.length; i++) {
-      sequences.push(writeUint32LE(4294967295));
-    }
+    for (let i = 0; i < inputs.length; i++) sequences.push(writeUint32LE(4294967295));
     const hashSequence = hash256(concat(...sequences));
     const outputParts = [];
     for (const out of outputs) {
       outputParts.push(writeUint64LE(out.value));
-      const scriptPubKey = addressToScriptPubKey(out.address);
-      outputParts.push(writeVarInt(scriptPubKey.length));
-      outputParts.push(scriptPubKey);
+      const spk = addressToScriptPubKey(out.address);
+      outputParts.push(writeVarInt(spk.length));
+      outputParts.push(spk);
     }
     const hashOutputs = hash256(concat(...outputParts));
     const thisOutpoint = concat(
@@ -777,105 +796,174 @@ var __wdk_exports = (() => {
     scriptCode[24] = 136;
     scriptCode[25] = 172;
     const value = writeUint64LE(inputs[inputIndex].value);
-    const nSequence = writeUint32LE(4294967295);
     const preimage = concat(
-      nVersion,
+      writeUint32LE(version),
       hashPrevouts,
       hashSequence,
       thisOutpoint,
       scriptCode,
       value,
-      nSequence,
+      writeUint32LE(4294967295),
+      // nSequence
       hashOutputs,
-      nLockTime,
-      nHashType
+      writeUint32LE(locktime),
+      writeUint32LE(sighashType)
     );
     return hash256(preimage);
   }
-  function serializeTransaction(inputs, outputs, witnesses) {
+  function computeLegacySighash(psbt, inputIndex, keyHandle) {
+    const { inputs, outputs, version, locktime } = psbt.unsignedTx;
+    const sighashType = psbt.inputs[inputIndex].sighashType;
+    const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+    const pubkeySha = native.crypto.sha256(pubkey);
+    const pubkeyHash = native.crypto.ripemd160(pubkeySha);
+    const prevScriptPubKey = new Uint8Array(25);
+    prevScriptPubKey[0] = 118;
+    prevScriptPubKey[1] = 169;
+    prevScriptPubKey[2] = 20;
+    prevScriptPubKey.set(pubkeyHash, 3);
+    prevScriptPubKey[23] = 136;
+    prevScriptPubKey[24] = 172;
     const parts = [];
-    parts.push(writeUint32LE(2));
-    parts.push(new Uint8Array([0, 1]));
+    parts.push(writeUint32LE(version));
     parts.push(writeVarInt(inputs.length));
-    for (const inp of inputs) {
-      parts.push(reverseTxid(inp.txid));
-      parts.push(writeUint32LE(inp.vout));
-      parts.push(writeVarInt(0));
+    for (let i = 0; i < inputs.length; i++) {
+      parts.push(reverseTxid(inputs[i].txid));
+      parts.push(writeUint32LE(inputs[i].vout));
+      if (i === inputIndex) {
+        parts.push(writeVarInt(prevScriptPubKey.length));
+        parts.push(prevScriptPubKey);
+      } else {
+        parts.push(writeVarInt(0));
+      }
       parts.push(writeUint32LE(4294967295));
     }
     parts.push(writeVarInt(outputs.length));
     for (const out of outputs) {
       parts.push(writeUint64LE(out.value));
-      const scriptPubKey = addressToScriptPubKey(out.address);
-      parts.push(writeVarInt(scriptPubKey.length));
-      parts.push(scriptPubKey);
+      const spk = addressToScriptPubKey(out.address);
+      parts.push(writeVarInt(spk.length));
+      parts.push(spk);
     }
-    for (const witness of witnesses) {
-      parts.push(writeVarInt(witness.length));
-      for (const item of witness) {
-        parts.push(writeVarInt(item.length));
-        parts.push(item);
+    parts.push(writeUint32LE(locktime));
+    parts.push(writeUint32LE(sighashType));
+    return hash256(concat(...parts));
+  }
+  function finalizeInput(psbt, inputIndex) {
+    const input = psbt.inputs[inputIndex];
+    if (input.partialSigs.size === 0) {
+      throw new Error(`Input ${inputIndex} has no signatures`);
+    }
+    const [pubkeyHex, sigWithHashType] = input.partialSigs.entries().next().value;
+    const pubkey = native.encoding.hexDecode(pubkeyHex);
+    if (input.witnessUtxo) {
+      const witnessParts = [];
+      witnessParts.push(writeVarInt(2));
+      witnessParts.push(writeVarInt(sigWithHashType.length));
+      witnessParts.push(sigWithHashType);
+      witnessParts.push(writeVarInt(pubkey.length));
+      witnessParts.push(pubkey);
+      input.finalScriptWitness = concat(...witnessParts);
+    } else if (input.nonWitnessUtxo) {
+      const scriptParts = [];
+      scriptParts.push(new Uint8Array([sigWithHashType.length]));
+      scriptParts.push(sigWithHashType);
+      scriptParts.push(new Uint8Array([pubkey.length]));
+      scriptParts.push(pubkey);
+      input.finalScriptSig = concat(...scriptParts);
+    }
+    input.partialSigs.clear();
+    input.bip32Derivation = void 0;
+    input.sighashType = 1;
+  }
+  function extractTransaction(psbt) {
+    const { inputs, outputs, version, locktime } = psbt.unsignedTx;
+    const hasWitness = psbt.inputs.some((inp) => inp.finalScriptWitness);
+    const parts = [];
+    parts.push(writeUint32LE(version));
+    if (hasWitness) {
+      parts.push(new Uint8Array([0, 1]));
+    }
+    parts.push(writeVarInt(inputs.length));
+    for (let i = 0; i < inputs.length; i++) {
+      parts.push(reverseTxid(inputs[i].txid));
+      parts.push(writeUint32LE(inputs[i].vout));
+      const scriptSig = psbt.inputs[i].finalScriptSig ?? new Uint8Array(0);
+      parts.push(writeVarInt(scriptSig.length));
+      if (scriptSig.length > 0) parts.push(scriptSig);
+      parts.push(writeUint32LE(4294967295));
+    }
+    parts.push(writeVarInt(outputs.length));
+    for (const out of outputs) {
+      parts.push(writeUint64LE(out.value));
+      const spk = addressToScriptPubKey(out.address);
+      parts.push(writeVarInt(spk.length));
+      parts.push(spk);
+    }
+    if (hasWitness) {
+      for (let i = 0; i < inputs.length; i++) {
+        const witness = psbt.inputs[i].finalScriptWitness;
+        if (witness) {
+          parts.push(witness);
+        } else {
+          parts.push(new Uint8Array([0]));
+        }
       }
     }
-    parts.push(writeUint32LE(0));
-    return concat(...parts);
-  }
-  function serializeTransactionNoWitness(inputs, outputs) {
-    const parts = [];
-    parts.push(writeUint32LE(2));
-    parts.push(writeVarInt(inputs.length));
-    for (const inp of inputs) {
-      parts.push(reverseTxid(inp.txid));
-      parts.push(writeUint32LE(inp.vout));
-      parts.push(writeVarInt(0));
-      parts.push(writeUint32LE(4294967295));
-    }
-    parts.push(writeVarInt(outputs.length));
-    for (const out of outputs) {
-      parts.push(writeUint64LE(out.value));
-      const scriptPubKey = addressToScriptPubKey(out.address);
-      parts.push(writeVarInt(scriptPubKey.length));
-      parts.push(scriptPubKey);
-    }
-    parts.push(writeUint32LE(0));
-    return concat(...parts);
-  }
-  function computeTxid(inputs, outputs) {
-    const rawNoWitness = serializeTransactionNoWitness(inputs, outputs);
-    const h = hash256(rawNoWitness);
-    const reversed = new Uint8Array(h.length);
-    for (let i = 0; i < h.length; i++) {
-      reversed[i] = h[h.length - 1 - i];
-    }
-    return reversed;
-  }
-  function buildTransaction(inputs, outputs, keyHandles) {
-    if (inputs.length !== keyHandles.length) {
-      throw new Error(
-        `Mismatched inputs (${inputs.length}) and keyHandles (${keyHandles.length})`
-      );
-    }
-    if (inputs.length === 0) {
-      throw new Error("Transaction must have at least one input");
-    }
-    if (outputs.length === 0) {
-      throw new Error("Transaction must have at least one output");
-    }
-    const witnesses = [];
+    parts.push(writeUint32LE(locktime));
+    const rawTx = concat(...parts);
+    const noWitnessParts = [];
+    noWitnessParts.push(writeUint32LE(version));
+    noWitnessParts.push(writeVarInt(inputs.length));
     for (let i = 0; i < inputs.length; i++) {
-      const sighash = computeSegwitSighash(inputs, outputs, i, keyHandles[i]);
-      const signature = native.crypto.signSecp256k1(keyHandles[i], sighash);
-      const derSig = encodeDER(signature);
-      const sigWithHashType = appendByte(derSig, 1);
-      const pubkey = native.crypto.getPublicKey(keyHandles[i], "secp256k1");
-      witnesses.push([sigWithHashType, pubkey]);
+      noWitnessParts.push(reverseTxid(inputs[i].txid));
+      noWitnessParts.push(writeUint32LE(inputs[i].vout));
+      const scriptSig = psbt.inputs[i].finalScriptSig ?? new Uint8Array(0);
+      noWitnessParts.push(writeVarInt(scriptSig.length));
+      if (scriptSig.length > 0) noWitnessParts.push(scriptSig);
+      noWitnessParts.push(writeUint32LE(4294967295));
     }
-    const rawTx = serializeTransaction(inputs, outputs, witnesses);
-    const txid = computeTxid(inputs, outputs);
+    noWitnessParts.push(writeVarInt(outputs.length));
+    for (const out of outputs) {
+      noWitnessParts.push(writeUint64LE(out.value));
+      const spk = addressToScriptPubKey(out.address);
+      noWitnessParts.push(writeVarInt(spk.length));
+      noWitnessParts.push(spk);
+    }
+    noWitnessParts.push(writeUint32LE(locktime));
+    const rawNoWitness = concat(...noWitnessParts);
+    const txidBytes = hash256(rawNoWitness);
+    const txidReversed = new Uint8Array(txidBytes.length);
+    for (let i = 0; i < txidBytes.length; i++) {
+      txidReversed[i] = txidBytes[txidBytes.length - 1 - i];
+    }
     return {
       rawTx: native.encoding.hexEncode(rawTx),
-      txid: native.encoding.hexEncode(txid)
+      txid: native.encoding.hexEncode(txidReversed)
     };
+  }
+  function buildAndSignPsbt(inputs, outputs, keyHandles) {
+    if (inputs.length !== keyHandles.length) {
+      throw new Error(`Mismatched inputs (${inputs.length}) and keyHandles (${keyHandles.length})`);
+    }
+    if (inputs.length === 0) throw new Error("Transaction must have at least one input");
+    if (outputs.length === 0) throw new Error("Transaction must have at least one output");
+    const psbt = createPsbt(inputs, outputs);
+    for (let i = 0; i < inputs.length; i++) {
+      const spk = inputs[i].scriptPubKey ? native.encoding.hexDecode(inputs[i].scriptPubKey) : addressToScriptPubKey(inputs[i].address ?? "");
+      if (spk.length === 25 && spk[0] === 118) {
+        addWitnessUtxo(psbt, i, inputs[i].value, spk);
+      } else {
+        addWitnessUtxo(psbt, i, inputs[i].value, spk);
+      }
+    }
+    for (let i = 0; i < inputs.length; i++) {
+      signInput(psbt, i, keyHandles[i]);
+    }
+    for (let i = 0; i < inputs.length; i++) {
+      finalizeInput(psbt, i);
+    }
+    return extractTransaction(psbt);
   }
 
   // ../wdk-v2-wallet-btc/src/cache.ts
@@ -1579,7 +1667,7 @@ var __wdk_exports = (() => {
     async signTransaction(tx, keyHandle) {
       const btcTx = tx.data;
       const keyHandles = btcTx.inputs.map(() => keyHandle);
-      const signed = buildTransaction(btcTx.inputs, btcTx.outputs, keyHandles);
+      const signed = buildAndSignPsbt(btcTx.inputs, btcTx.outputs, keyHandles);
       return {
         chain: "btc",
         rawTx: signed.rawTx,
