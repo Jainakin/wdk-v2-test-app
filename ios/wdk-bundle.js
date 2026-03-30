@@ -656,28 +656,49 @@ var __wdk_exports = (() => {
   var DUST_THRESHOLD_P2WPKH = 294;
   var MIN_TX_FEE_SATS = 141;
   var MAX_UTXO_INPUTS = 200;
-  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH, destinationAddress) {
+  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH, destinationAddr) {
     const sorted = [...utxos].sort((a, b) => b.value - a.value);
     const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
+    const destOutputVbytes = estimateOutputVbytes(destinationAddr);
+    const changeOutputVbytes = VBYTES_PER_OUTPUT_DEFAULT;
+    const changeCost = Math.ceil(changeOutputVbytes * feeRate);
+    const avoidResult = avoidChange(candidates, targetAmount, feeRate, destOutputVbytes, changeCost);
+    if (avoidResult) return avoidResult;
+    return addUntilReach(candidates, targetAmount, feeRate, dustThreshold, destOutputVbytes, changeOutputVbytes);
+  }
+  function avoidChange(sorted, targetAmount, feeRate, destOutputVbytes, changeCost) {
     const selected = [];
     let totalInput = 0;
-    const destOutputVbytes = estimateOutputVbytes(destinationAddress);
-    const changeOutputVbytes = VBYTES_PER_OUTPUT_DEFAULT;
-    for (const utxo of candidates) {
+    for (const utxo of sorted) {
       selected.push(utxo);
       totalInput += utxo.value;
-      const vbytes2 = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes + changeOutputVbytes;
-      let fee = Math.ceil(vbytes2 * feeRate);
-      if (fee < MIN_TX_FEE_SATS) {
-        fee = MIN_TX_FEE_SATS;
+      const vbytes = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes;
+      let fee = Math.ceil(vbytes * feeRate);
+      if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
+      if (totalInput >= targetAmount + fee) {
+        const remainder = totalInput - targetAmount - fee;
+        if (remainder < changeCost) {
+          return { selected: [...selected], fee: fee + remainder, change: 0 };
+        }
       }
+    }
+    return null;
+  }
+  function addUntilReach(sorted, targetAmount, feeRate, dustThreshold, destOutputVbytes, changeOutputVbytes) {
+    const selected = [];
+    let totalInput = 0;
+    for (const utxo of sorted) {
+      selected.push(utxo);
+      totalInput += utxo.value;
+      const vbytes = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes + changeOutputVbytes;
+      let fee = Math.ceil(vbytes * feeRate);
+      if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
       if (totalInput >= targetAmount + fee) {
         const change = totalInput - targetAmount - fee;
         if (change > 0 && change < dustThreshold) {
-          const totalFee = totalInput - targetAmount;
-          return { selected, fee: totalFee, change: 0 };
+          return { selected: [...selected], fee: totalInput - targetAmount, change: 0 };
         }
-        return { selected, fee, change };
+        return { selected: [...selected], fee, change };
       }
     }
     return null;
@@ -2626,6 +2647,12 @@ var __wdk_exports = (() => {
         value: out.value
       }));
       const { rawTx, txid } = buildAndSignPsbt(psbtInputs, psbtOutputs, keyHandles);
+      const rawBytes = native.encoding.hexDecode(rawTx);
+      const actualWeight = rawBytes.length * 4;
+      const actualVsize = Math.ceil(actualWeight / 4);
+      const minRequiredFee = Math.ceil(actualVsize * feeRate);
+      if (selection.fee < minRequiredFee) {
+      }
       const broadcastTxid = await this.client.broadcast(rawTx);
       return { txHash: broadcastTxid || txid, fee: selection.fee };
     }
