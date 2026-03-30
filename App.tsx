@@ -324,6 +324,64 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
     },
 
     // ── State ─────────────────────────────────────────────────────────
+    // ── Account lifecycle ─────────────────────────────────────────────
+    {
+      name: 'getAccount',
+      fn: async () => {
+        const acct = await WDKWallet.getAccount({chain: 'btc', index: 0});
+        const ok = acct.chainId === 'btc' && acct.address.startsWith('tb1q') &&
+          acct.index === 0 && typeof acct.publicKey === 'string' && acct.publicKey.length === 66;
+        return {passed: ok, detail: `addr=${acct.address.slice(0,20)}... pub=${acct.publicKey.slice(0,10)}...`};
+      },
+    },
+    {
+      name: 'getAccount_cached',
+      fn: async () => {
+        const a1 = await WDKWallet.getAccount({chain: 'btc', index: 0});
+        const a2 = await WDKWallet.getAccount({chain: 'btc', index: 0});
+        const ok = a1.address === a2.address && a1.publicKey === a2.publicKey;
+        return {passed: ok, detail: ok ? 'same account returned' : 'different accounts!'};
+      },
+    },
+    {
+      name: 'getAccountByPath',
+      fn: async () => {
+        const acct = await WDKWallet.getAccountByPath({chain: 'btc', path: "m/84'/1'/0'/0/0"});
+        const ok = acct.address.startsWith('tb1q') && acct.path === "m/84'/1'/0'/0/0";
+        return {passed: ok, detail: `path=${acct.path} addr=${acct.address.slice(0,20)}...`};
+      },
+    },
+    {
+      name: 'toReadOnlyAccount',
+      fn: async () => {
+        const ro = await WDKWallet.toReadOnlyAccount({chain: 'btc', index: 0});
+        const ok = ro.address.startsWith('tb1q') && ro.index === 0 &&
+          !('publicKey' in ro && (ro as any).publicKey);
+        return {passed: ok, detail: `addr=${ro.address.slice(0,20)}... hasPublicKey=${'publicKey' in ro}`};
+      },
+    },
+    {
+      name: 'disposeAccount_and_recreate',
+      fn: async () => {
+        // Get account, dispose it, re-get — should still work (new handle)
+        const before = await WDKWallet.getAccount({chain: 'btc', index: 0});
+        await WDKWallet.disposeAccount({chain: 'btc', index: 0});
+        const after = await WDKWallet.getAccount({chain: 'btc', index: 0});
+        // Same address (same derivation path) but fresh account
+        const ok = before.address === after.address;
+        return {passed: ok, detail: ok ? 'recreated with same address' : `${before.address} != ${after.address}`};
+      },
+    },
+    {
+      name: 'getAccount_legacy',
+      fn: async () => {
+        const acct = await WDKWallet.getAccount({chain: 'btc', index: 0, addressType: 'p2pkh'});
+        const ok = (acct.address.startsWith('m') || acct.address.startsWith('n')) && acct.path.includes("/44'/");
+        return {passed: ok, detail: `legacy path=${acct.path} addr=${acct.address}`};
+      },
+    },
+
+    // ── State ────────────────────────────────────────────────────────────
     {
       name: 'getState_is_ready',
       fn: async () => {
