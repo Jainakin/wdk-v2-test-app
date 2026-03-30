@@ -511,6 +511,16 @@ var __wdk_exports = (() => {
     getReadOnlyAccount(address, index = 0) {
       return this.createReadOnlyAccount(address, index);
     }
+    /** Clear all cached accounts (e.g. when network changes) */
+    clearAccounts() {
+      for (const [, account] of this.accounts) {
+        account.dispose();
+        if (this.keyManager) {
+          this.keyManager.release(account.keyHandle);
+        }
+      }
+      this.accounts.clear();
+    }
     // ── Disposal ───────────────────────────────────────────────────────────
     /** Dispose a single account by index */
     disposeAccount(index = 0, addressType) {
@@ -1537,18 +1547,22 @@ var __wdk_exports = (() => {
       return bodyStr.trim();
     }
     async estimateFee(blocks) {
-      const data = await this.fetchJson("/v1/fees/recommended");
-      let satPerVb;
-      if (blocks <= 1) {
-        satPerVb = data.fastestFee;
-      } else if (blocks <= 3) {
-        satPerVb = data.halfHourFee;
-      } else if (blocks <= 6) {
-        satPerVb = data.hourFee;
-      } else {
-        satPerVb = data.economyFee;
+      try {
+        const data = await this.fetchJson("/v1/fees/recommended");
+        let satPerVb;
+        if (blocks <= 1) {
+          satPerVb = data.fastestFee;
+        } else if (blocks <= 3) {
+          satPerVb = data.halfHourFee;
+        } else if (blocks <= 6) {
+          satPerVb = data.hourFee;
+        } else {
+          satPerVb = data.economyFee;
+        }
+        return satPerVb * 1e3 / 1e8;
+      } catch {
+        return 1 * 1e3 / 1e8;
       }
-      return satPerVb * 1e3 / 1e8;
     }
     async getBlockHeight() {
       const text = await this.fetchText("/blocks/tip/height");
@@ -2701,6 +2715,7 @@ var __wdk_exports = (() => {
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async initialize(config) {
       this.config = config;
+      this.clearAccounts();
       this.network_ = config.network ?? (config.isTestnet ? "testnet" : "bitcoin");
       this.isTestnet_ = this.network_ !== "bitcoin";
       this.coinType = this.network_ === "bitcoin" ? 0 : 1;
@@ -2870,6 +2885,10 @@ var __wdk_exports = (() => {
     },
     disposeAccount(params) {
       return engine.dispatch("disposeAccount", params);
+    },
+    // ── Test-only: direct PSBT access for regtest verification ──
+    __buildAndSignPsbt(inputs, outputs, keyHandles) {
+      return buildAndSignPsbt(inputs, outputs, keyHandles);
     }
   };
   globalThis.wdk = wdk;
