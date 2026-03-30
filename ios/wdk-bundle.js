@@ -342,18 +342,17 @@ var __wdk_exports = (() => {
           if (!to) throw new StateError('Missing "to" parameter');
           const amount = params.amount;
           if (!amount) throw new StateError('Missing "amount" parameter');
-          if (typeof wallet.quoteSendTransaction === "function") {
-            return wallet.quoteSendTransaction({ from, to, amount });
-          }
-          throw new StateError("quoteSend not supported for this chain");
+          return wallet.quoteSendTransaction({ from, to, amount });
         }
         case "getMaxSpendable": {
           const address = params.address;
           if (!address) throw new StateError('Missing "address" parameter');
-          if (typeof wallet.getMaxSpendable === "function") {
-            return wallet.getMaxSpendable(address);
-          }
-          throw new StateError("getMaxSpendable not supported for this chain");
+          return wallet.getMaxSpendable(address);
+        }
+        case "getReceipt": {
+          const txHash = params.txHash;
+          if (!txHash) throw new StateError('Missing "txHash" parameter');
+          return wallet.getTransactionReceipt(txHash);
         }
         default:
           throw new StateError(`Unknown action: ${action}`);
@@ -859,6 +858,28 @@ var __wdk_exports = (() => {
       return this.cache.size;
     }
   };
+  var ConcurrencyLimiter = class {
+    constructor(maxConcurrency = 8) {
+      this.maxConcurrency = maxConcurrency;
+      this.active = 0;
+      this.queue = [];
+    }
+    async run(fn) {
+      if (this.active >= this.maxConcurrency) {
+        await new Promise((resolve) => {
+          this.queue.push(resolve);
+        });
+      }
+      this.active++;
+      try {
+        return await fn();
+      } finally {
+        this.active--;
+        const next = this.queue.shift();
+        if (next) next();
+      }
+    }
+  };
 
   // ../wdk-v2-wallet-btc/src/client/blockbook-client.ts
   var BASE_URLS = {
@@ -871,6 +892,7 @@ var __wdk_exports = (() => {
   var BlockbookClient = class {
     constructor(network = "bitcoin", customUrl) {
       this.txCache = new LRUCache(100);
+      this.limiter = new ConcurrencyLimiter(8);
       this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS[network];
       if (!this.baseUrl) {
         throw new Error(
@@ -881,6 +903,9 @@ var __wdk_exports = (() => {
     async connect() {
     }
     async close() {
+      this.txCache.clear();
+    }
+    async reconnect() {
       this.txCache.clear();
     }
     async reconnect() {
@@ -929,6 +954,16 @@ var __wdk_exports = (() => {
       }
       this.txCache.set(txHash, data.hex);
       return data.hex;
+    }
+    async getTxStatus(txHash) {
+      const data = await this.fetchJson(`/api/v2/tx/${txHash}`);
+      return {
+        txHash: data.txid,
+        confirmed: data.confirmations > 0,
+        blockHeight: data.blockHeight ?? 0,
+        blockTime: data.blockTime ?? 0,
+        fee: parseInt(data.fees, 10) || 0
+      };
     }
     async broadcast(rawTx) {
       const data = await this.fetchJson(`/api/v2/sendtx/${rawTx}`);
@@ -1051,6 +1086,8 @@ var __wdk_exports = (() => {
     constructor(network = "bitcoin", customUrl) {
       /** LRU cache for raw transaction hex (avoids re-fetching same tx) */
       this.txCache = new LRUCache(100);
+      /** Concurrency limiter for parallel requests (matches production pLimit(8)) */
+      this.limiter = new ConcurrencyLimiter(8);
       this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS2[network];
     }
     async connect() {
@@ -1142,7 +1179,7 @@ var __wdk_exports = (() => {
     async getTransaction(txHash) {
       const cached = this.txCache.get(txHash);
       if (cached !== void 0) return cached;
-      const hex = await this.fetchText(`/tx/${txHash}/hex`);
+      const hex = await this.limiter.run(() => this.fetchText(`/tx/${txHash}/hex`));
       this.txCache.set(txHash, hex);
       return hex;
     }
@@ -1477,18 +1514,24 @@ var __wdk_exports = (() => {
      */
     async getTransactionHistory(address, limit = 25) {
       const detailed = await this.client.getDetailedHistory(address, limit);
-      return detailed.map((tx) => ({
-        txHash: tx.txHash,
-        chain: "btc",
-        from: tx.direction === "received" ? tx.counterparties[0] ?? "" : address,
-        to: tx.direction === "sent" ? tx.counterparties[0] ?? "" : address,
-        amount: String(Math.abs(tx.amount)),
-        fee: String(tx.fee),
-        direction: tx.direction,
-        timestamp: tx.timestamp,
-        status: tx.confirmed ? "confirmed" : "pending",
-        blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
-      }));
+      return detailed.map((tx) => {
+        const uniqueCounterparties = [...new Set(tx.counterparties)];
+        return {
+          txHash: tx.txHash,
+          chain: "btc",
+          // Primary from/to for backwards compat (first counterparty)
+          from: tx.direction === "received" ? uniqueCounterparties[0] ?? "" : address,
+          to: tx.direction === "sent" ? uniqueCounterparties[0] ?? "" : address,
+          amount: String(Math.abs(tx.amount)),
+          fee: String(tx.fee),
+          direction: tx.direction,
+          // Full counterparty list (deduplicated)
+          counterparties: uniqueCounterparties,
+          timestamp: tx.timestamp,
+          status: tx.confirmed ? "confirmed" : "pending",
+          blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
+        };
+      });
     }
     // -----------------------------------------------------------------------
     // Transaction receipt
@@ -1498,17 +1541,7 @@ var __wdk_exports = (() => {
      * Matches production WDK's getTransactionReceipt().
      */
     async getTransactionReceipt(txHash) {
-      if (typeof this.client.getTxStatus === "function") {
-        return this.client.getTxStatus(txHash);
-      }
-      const rawHex = await this.client.getTransaction(txHash);
-      return {
-        txHash,
-        confirmed: rawHex.length > 0,
-        blockHeight: 0,
-        blockTime: 0,
-        fee: 0
-      };
+      return this.client.getTxStatus(txHash);
     }
     // -----------------------------------------------------------------------
     // Cleanup
@@ -1613,6 +1646,9 @@ var __wdk_exports = (() => {
     },
     getMaxSpendable(params) {
       return engine.dispatch("getMaxSpendable", params);
+    },
+    getReceipt(params) {
+      return engine.dispatch("getReceipt", params);
     }
   };
   function convertBits2(data, fromBits, toBits, pad) {
