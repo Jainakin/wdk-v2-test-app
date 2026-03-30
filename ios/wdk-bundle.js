@@ -1415,6 +1415,436 @@ var __wdk_exports = (() => {
     }
   };
 
+  // ../wdk-v2-wallet-btc/src/client/electrum-types.ts
+  var ELECTRUM_WS_URLS = {
+    bitcoin: "wss://blockstream.info/electrum-websocket",
+    testnet: "wss://blockstream.info/testnet/electrum-websocket",
+    regtest: ""
+    // requires user-provided URL
+  };
+  var ELECTRUM_CLIENT_NAME = "wdk-v2";
+  var ELECTRUM_PROTOCOL_VERSION = "1.4";
+  var ELECTRUM_PING_INTERVAL = 55e3;
+  var ELECTRUM_REQUEST_TIMEOUT = 15e3;
+
+  // ../wdk-v2-wallet-btc/src/client/electrum-transport.ts
+  var ElectrumTransport = class {
+    constructor() {
+      this.wsHandle = null;
+      this.requestId = 0;
+      this.pending = /* @__PURE__ */ new Map();
+      this.subscriptions = /* @__PURE__ */ new Map();
+      this.pingTimer = null;
+      this.url = "";
+      this.connected = false;
+      this.reconnecting = false;
+      this.reconnectAttempt = 0;
+      this.maxReconnectDelay = 3e4;
+      this.onCloseCallback = null;
+    }
+    /**
+     * Connect to an Electrum WebSocket server.
+     * Performs the server.version handshake.
+     */
+    async connect(url) {
+      this.url = url;
+      this.wsHandle = native.net.wsConnect(url);
+      native.net.wsOnMessage(this.wsHandle, (data) => {
+        this.handleMessage(data);
+      });
+      native.net.wsOnClose(this.wsHandle, (error) => {
+        this.connected = false;
+        this.rejectAllPending(error ?? "Connection closed");
+        if (this.pingTimer) {
+          clearInterval(this.pingTimer);
+          this.pingTimer = null;
+        }
+        if (this.onCloseCallback) this.onCloseCallback();
+        if (this.wsHandle !== null && !this.reconnecting) {
+          this.scheduleReconnect();
+        }
+      });
+      this.connected = true;
+      this.reconnectAttempt = 0;
+      const result = await this.request("server.version", [
+        ELECTRUM_CLIENT_NAME,
+        ELECTRUM_PROTOCOL_VERSION
+      ]);
+      this.pingTimer = setInterval(() => {
+        if (this.connected) {
+          this.request("server.ping", []).catch(() => {
+          });
+        }
+      }, ELECTRUM_PING_INTERVAL);
+      return {
+        serverVersion: result[0] ?? "unknown",
+        protocolVersion: result[1] ?? "1.4"
+      };
+    }
+    /**
+     * Send a JSON-RPC request and wait for the response.
+     */
+    async request(method, params) {
+      if (!this.connected || this.wsHandle === null) {
+        throw new Error("Electrum transport not connected");
+      }
+      const id = ++this.requestId;
+      const rpcRequest = {
+        jsonrpc: "2.0",
+        id,
+        method,
+        params
+      };
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`Electrum request timeout: ${method} (${ELECTRUM_REQUEST_TIMEOUT}ms)`));
+        }, ELECTRUM_REQUEST_TIMEOUT);
+        this.pending.set(id, { resolve, reject, timer });
+        native.net.wsSend(this.wsHandle, JSON.stringify(rpcRequest));
+      });
+    }
+    /**
+     * Send a batch of JSON-RPC requests.
+     */
+    async batch(calls) {
+      if (!this.connected || this.wsHandle === null) {
+        throw new Error("Electrum transport not connected");
+      }
+      const requests = [];
+      const ids = [];
+      for (const call of calls) {
+        const id = ++this.requestId;
+        ids.push(id);
+        requests.push({
+          jsonrpc: "2.0",
+          id,
+          method: call.method,
+          params: call.params
+        });
+      }
+      const promises = ids.map((id) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error(`Electrum batch request timeout (${ELECTRUM_REQUEST_TIMEOUT}ms)`));
+          }, ELECTRUM_REQUEST_TIMEOUT);
+          this.pending.set(id, { resolve, reject, timer });
+        });
+      });
+      native.net.wsSend(this.wsHandle, JSON.stringify(requests));
+      return Promise.all(promises);
+    }
+    /**
+     * Register a subscription notification handler.
+     * When the server pushes a notification for this method, the callback is invoked.
+     */
+    onNotification(method, callback) {
+      this.subscriptions.set(method, callback);
+    }
+    /**
+     * Remove a subscription handler.
+     */
+    removeNotification(method) {
+      this.subscriptions.delete(method);
+    }
+    /**
+     * Set a callback for when the connection closes.
+     */
+    onClose(callback) {
+      this.onCloseCallback = callback;
+    }
+    /**
+     * Close the connection. Prevents auto-reconnect.
+     */
+    close() {
+      if (this.pingTimer) {
+        clearInterval(this.pingTimer);
+        this.pingTimer = null;
+      }
+      this.connected = false;
+      this.rejectAllPending("Connection closed by client");
+      if (this.wsHandle !== null) {
+        const handle = this.wsHandle;
+        this.wsHandle = null;
+        native.net.wsClose(handle);
+      }
+      this.subscriptions.clear();
+    }
+    /** Is the transport currently connected? */
+    get isConnected() {
+      return this.connected;
+    }
+    // ── Internal ───────────────────────────────────────────────────────────
+    handleMessage(data) {
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          this.dispatchResponse(item);
+        }
+        return;
+      }
+      if ("id" in parsed && typeof parsed.id === "number") {
+        this.dispatchResponse(parsed);
+      } else if ("method" in parsed) {
+        this.dispatchNotification(parsed);
+      }
+    }
+    dispatchResponse(response) {
+      const pending = this.pending.get(response.id);
+      if (!pending) return;
+      this.pending.delete(response.id);
+      clearTimeout(pending.timer);
+      if (response.error) {
+        const errMsg = typeof response.error === "string" ? response.error : response.error.message;
+        pending.reject(new Error(`Electrum error: ${errMsg}`));
+      } else {
+        pending.resolve(response.result);
+      }
+    }
+    dispatchNotification(notification) {
+      const handler = this.subscriptions.get(notification.method);
+      if (handler) {
+        handler(notification.params);
+      }
+    }
+    rejectAllPending(reason) {
+      for (const [id, pending] of this.pending) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(reason));
+      }
+      this.pending.clear();
+    }
+    scheduleReconnect() {
+      if (this.wsHandle === null) return;
+      this.reconnecting = true;
+      const delay = Math.min(
+        1e3 * Math.pow(2, this.reconnectAttempt),
+        this.maxReconnectDelay
+      );
+      this.reconnectAttempt++;
+      setTimeout(async () => {
+        this.reconnecting = false;
+        try {
+          await this.connect(this.url);
+        } catch {
+        }
+      }, delay);
+    }
+  };
+
+  // ../wdk-v2-wallet-btc/src/client/electrum-ws-client.ts
+  var ElectrumWsClient = class {
+    constructor(network = "bitcoin", customUrl) {
+      this.txCache = new LRUCache(100);
+      this.limiter = new ConcurrencyLimiter(8);
+      this.activeSubscriptions = /* @__PURE__ */ new Map();
+      this.network = network;
+      this.url = customUrl ?? ELECTRUM_WS_URLS[network];
+      if (!this.url) {
+        throw new Error(
+          `ElectrumWsClient: no default URL for ${network}. Provide a custom URL.`
+        );
+      }
+      this.transport = new ElectrumTransport();
+    }
+    // ── Connection lifecycle ────────────────────────────────────────────────
+    async connect() {
+      const info = await this.transport.connect(this.url);
+      this.transport.onNotification(
+        "blockchain.scripthash.subscribe",
+        (params) => {
+          const [scripthash, status] = params;
+          const handler = this.activeSubscriptions.get(scripthash);
+          if (handler) handler(status);
+        }
+      );
+    }
+    async close() {
+      this.transport.close();
+      this.txCache.clear();
+      this.activeSubscriptions.clear();
+    }
+    async reconnect() {
+      this.transport.close();
+      await this.connect();
+    }
+    // ── Scripthash computation ──────────────────────────────────────────────
+    /**
+     * Convert a Bitcoin address to Electrum scripthash.
+     * scripthash = reverse(SHA256(scriptPubKey))
+     */
+    addressToScripthash(address) {
+      const spk = addressToScriptPubKey(address);
+      const hash = native.crypto.sha256(spk);
+      const reversed = new Uint8Array(hash.length);
+      for (let i = 0; i < hash.length; i++) {
+        reversed[i] = hash[hash.length - 1 - i];
+      }
+      return native.encoding.hexEncode(reversed);
+    }
+    // ── IBtcClient methods ──────────────────────────────────────────────────
+    async getBalance(address) {
+      const scripthash = this.addressToScripthash(address);
+      const result = await this.limiter.run(
+        () => this.transport.request("blockchain.scripthash.get_balance", [scripthash])
+      );
+      return {
+        confirmed: result.confirmed,
+        unconfirmed: result.unconfirmed
+      };
+    }
+    async listUnspent(address) {
+      const scripthash = this.addressToScripthash(address);
+      const result = await this.limiter.run(
+        () => this.transport.request("blockchain.scripthash.listunspent", [scripthash])
+      );
+      return result.map((u) => ({
+        tx_hash: u.tx_hash,
+        tx_pos: u.tx_pos,
+        value: u.value,
+        height: u.height
+      }));
+    }
+    async getHistory(address) {
+      const scripthash = this.addressToScripthash(address);
+      const result = await this.limiter.run(
+        () => this.transport.request("blockchain.scripthash.get_history", [scripthash])
+      );
+      return result.map((h) => ({
+        tx_hash: h.tx_hash,
+        height: h.height
+      }));
+    }
+    async getDetailedHistory(address, limit = 25, _afterTxId, _page) {
+      const history = await this.getHistory(address);
+      const entries = history.slice(0, limit);
+      const batchCalls = entries.map((h) => ({
+        method: "blockchain.transaction.get",
+        params: [h.tx_hash, true]
+        // verbose=true
+      }));
+      const txDetails = await this.transport.batch(batchCalls);
+      return txDetails.map((tx) => {
+        const inputAddresses = /* @__PURE__ */ new Set();
+        let totalIn = 0;
+        for (const vin of tx.vin) {
+          if (vin.prevout?.scriptpubkey_address) {
+            inputAddresses.add(vin.prevout.scriptpubkey_address);
+            totalIn += vin.prevout.value;
+          }
+        }
+        const outputAddresses = /* @__PURE__ */ new Set();
+        let totalOut = 0;
+        let myOut = 0;
+        for (const vout of tx.vout) {
+          if (vout.scriptpubkey_address) {
+            outputAddresses.add(vout.scriptpubkey_address);
+            totalOut += vout.value;
+            if (vout.scriptpubkey_address === address) myOut += vout.value;
+          }
+        }
+        const isSender = inputAddresses.has(address);
+        const isReceiver = outputAddresses.has(address);
+        const direction = isSender && isReceiver ? "self" : isSender ? "sent" : "received";
+        let amount = 0;
+        if (direction === "received") {
+          amount = myOut;
+        } else if (direction === "sent") {
+          amount = totalIn - myOut - (tx.fee ?? 0);
+        }
+        const counterparties = [];
+        if (direction === "sent") {
+          outputAddresses.forEach((a) => {
+            if (a !== address) counterparties.push(a);
+          });
+        } else if (direction === "received") {
+          inputAddresses.forEach((a) => {
+            if (a !== address) counterparties.push(a);
+          });
+        }
+        const confirmed = (tx.confirmations ?? 0) > 0;
+        const height = entries.find((h) => h.tx_hash === tx.txid)?.height ?? 0;
+        return {
+          txHash: tx.txid,
+          direction,
+          amount,
+          fee: tx.fee ?? 0,
+          timestamp: tx.blocktime ?? 0,
+          blockHeight: height > 0 ? height : 0,
+          confirmed,
+          counterparties: [...new Set(counterparties)]
+        };
+      });
+    }
+    async getTransaction(txHash) {
+      const cached = this.txCache.get(txHash);
+      if (cached !== void 0) return cached;
+      const hex = await this.limiter.run(
+        () => this.transport.request("blockchain.transaction.get", [txHash, false])
+      );
+      this.txCache.set(txHash, hex);
+      return hex;
+    }
+    async estimateFee(blocks) {
+      const result = await this.limiter.run(
+        () => this.transport.request("blockchain.estimatefee", [blocks])
+      );
+      if (result < 0) return 1e-5;
+      return result;
+    }
+    async broadcast(rawTx) {
+      const txid = await this.transport.request(
+        "blockchain.transaction.broadcast",
+        [rawTx]
+      );
+      return txid;
+    }
+    async getTxStatus(txHash) {
+      const tx = await this.limiter.run(
+        () => this.transport.request("blockchain.transaction.get", [txHash, true])
+      );
+      const height = await this.getBlockHeightForTx(txHash);
+      return {
+        txHash: tx.txid,
+        confirmed: (tx.confirmations ?? 0) > 0,
+        blockHeight: height,
+        blockTime: tx.blocktime ?? 0,
+        fee: tx.fee ?? 0
+      };
+    }
+    // ── Subscription support ────────────────────────────────────────────────
+    /**
+     * Subscribe to address balance changes.
+     * The callback fires when the address's transaction history changes.
+     */
+    async subscribeAddress(address, callback) {
+      const scripthash = this.addressToScripthash(address);
+      this.activeSubscriptions.set(scripthash, callback);
+      const status = await this.transport.request(
+        "blockchain.scripthash.subscribe",
+        [scripthash]
+      );
+      return status;
+    }
+    /**
+     * Unsubscribe from address balance changes.
+     */
+    unsubscribeAddress(address) {
+      const scripthash = this.addressToScripthash(address);
+      this.activeSubscriptions.delete(scripthash);
+    }
+    // ── Helpers ─────────────────────────────────────────────────────────────
+    async getBlockHeightForTx(txHash) {
+      return 0;
+    }
+  };
+
   // ../wdk-v2-wallet-btc/src/client/index.ts
   function createClient(descOrClient, network = "bitcoin") {
     if (descOrClient && typeof descOrClient === "object" && "getBalance" in descOrClient && "listUnspent" in descOrClient && "broadcast" in descOrClient) {
@@ -1429,12 +1859,13 @@ var __wdk_exports = (() => {
         return new BlockbookClient(net, desc.url);
       case "mempool-rest":
         return new MempoolRestClient(net, desc.url);
-      // Production Electrum descriptors — not yet implemented, but recognized
-      // so config doesn't silently break when switching from production
-      case "electrum":
+      // Electrum WebSocket — production-compatible transport
       case "electrum-ws":
+        return new ElectrumWsClient(net, desc.url);
+      // Electrum TCP — not yet supported (requires native TCP bridge)
+      case "electrum":
         throw new Error(
-          `BTC client type "${desc.type}" is recognized but not yet implemented in v2. Use "blockbook-http" or "mempool-rest" instead.`
+          `BTC client type "electrum" (TCP) is not yet implemented in v2. Use "electrum-ws" for WebSocket or "blockbook-http"/"mempool-rest" for HTTP.`
         );
       default:
         throw new Error(`Unknown BTC client type: ${desc.type}`);
