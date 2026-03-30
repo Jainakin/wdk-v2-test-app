@@ -349,6 +349,12 @@ var __wdk_exports = (() => {
           if (!address) throw new StateError('Missing "address" parameter');
           return wallet.getMaxSpendable(address);
         }
+        case "getFeeRates": {
+          if (typeof wallet.getFeeRates === "function") {
+            return wallet.getFeeRates();
+          }
+          throw new StateError("getFeeRates not supported for this chain");
+        }
         case "getReceipt": {
           const txHash = params.txHash;
           if (!txHash) throw new StateError('Missing "txHash" parameter');
@@ -464,20 +470,30 @@ var __wdk_exports = (() => {
 
   // ../wdk-v2-wallet-btc/src/utxo.ts
   var VBYTES_PER_INPUT = 68;
-  var VBYTES_PER_OUTPUT = 31;
+  var VBYTES_PER_OUTPUT_DEFAULT = 31;
   var TX_OVERHEAD_VBYTES = 11;
+  function estimateOutputVbytes(address) {
+    if (!address) return VBYTES_PER_OUTPUT_DEFAULT;
+    if (address.startsWith("1") || address.startsWith("m") || address.startsWith("n")) return 34;
+    if (address.startsWith("3") || address.startsWith("2")) return 32;
+    if (address.startsWith("bc1p") || address.startsWith("tb1p") || address.startsWith("bcrt1p")) return 43;
+    if (address.length > 50) return 43;
+    return VBYTES_PER_OUTPUT_DEFAULT;
+  }
   var DUST_THRESHOLD_P2WPKH = 294;
-  var MIN_TX_FEE_SATS = 250;
+  var MIN_TX_FEE_SATS = 141;
   var MAX_UTXO_INPUTS = 200;
-  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH) {
+  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH, destinationAddress) {
     const sorted = [...utxos].sort((a, b) => b.value - a.value);
     const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
     const selected = [];
     let totalInput = 0;
+    const destOutputVbytes = estimateOutputVbytes(destinationAddress);
+    const changeOutputVbytes = VBYTES_PER_OUTPUT_DEFAULT;
     for (const utxo of candidates) {
       selected.push(utxo);
       totalInput += utxo.value;
-      const vbytes2 = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + 2 * VBYTES_PER_OUTPUT;
+      const vbytes2 = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes + changeOutputVbytes;
       let fee = Math.ceil(vbytes2 * feeRate);
       if (fee < MIN_TX_FEE_SATS) {
         fee = MIN_TX_FEE_SATS;
@@ -497,7 +513,7 @@ var __wdk_exports = (() => {
     const sorted = [...utxos].sort((a, b) => b.value - a.value);
     const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
     const totalInput = candidates.reduce((sum, u) => sum + u.value, 0);
-    const vbytes = TX_OVERHEAD_VBYTES + candidates.length * VBYTES_PER_INPUT + 1 * VBYTES_PER_OUTPUT;
+    const vbytes = TX_OVERHEAD_VBYTES + candidates.length * VBYTES_PER_INPUT + 1 * VBYTES_PER_OUTPUT_DEFAULT;
     let fee = Math.ceil(vbytes * feeRate);
     if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
     const maxSpendable = totalInput - fee;
@@ -891,10 +907,23 @@ var __wdk_exports = (() => {
   };
   var MEMPOOL_FEE_URL = "https://mempool.space/api/v1/fees/recommended";
   var BlockbookClient = class {
-    constructor(network = "bitcoin", customUrl) {
+    /**
+     * Constructor accepts two forms for production compatibility:
+     *   new BlockbookClient('testnet')              — use default URL
+     *   new BlockbookClient('bitcoin', 'https://...') — custom URL
+     *   new BlockbookClient({ url: 'https://...' }) — production config shape
+     */
+    constructor(networkOrConfig = "bitcoin", customUrl) {
       this.txCache = new LRUCache(100);
       this.limiter = new ConcurrencyLimiter(8);
-      this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS[network];
+      let network;
+      if (typeof networkOrConfig === "object") {
+        network = networkOrConfig.network ?? "bitcoin";
+        this.baseUrl = networkOrConfig.url.replace(/\/$/, "");
+      } else {
+        network = networkOrConfig;
+        this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS[network];
+      }
       if (!this.baseUrl) {
         throw new Error(
           `No default Blockbook server for network '${network}'. Provide a custom URL.`
@@ -1324,6 +1353,26 @@ var __wdk_exports = (() => {
       return String(balance.confirmed);
     }
     // -----------------------------------------------------------------------
+    // Fee rates
+    // -----------------------------------------------------------------------
+    /**
+     * Get current fee rates in sat/vB for different priority levels.
+     * Matches production WDK's fee rate exposure.
+     */
+    async getFeeRates() {
+      const [fast, medium, slow] = await Promise.all([
+        this.client.estimateFee(1),
+        this.client.estimateFee(3),
+        this.client.estimateFee(6)
+      ]);
+      const toSatVb = (btcPerKb) => Math.ceil(btcPerKb * 1e8 / 1e3);
+      return {
+        fast: toSatVb(fast),
+        medium: toSatVb(medium),
+        slow: toSatVb(slow)
+      };
+    }
+    // -----------------------------------------------------------------------
     // Quote + Max Spendable (production parity: quoteSendTransaction, getMaxSpendable)
     // -----------------------------------------------------------------------
     /**
@@ -1356,7 +1405,7 @@ var __wdk_exports = (() => {
         }));
         const btcPerKb = await this.client.estimateFee(3);
         const feeRate = Math.ceil(btcPerKb * 1e8 / 1e3);
-        const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH);
+        const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH, params.to);
         if (!selection) {
           return {
             feasible: false,
@@ -1376,7 +1425,9 @@ var __wdk_exports = (() => {
           inputCount: selection.selected.length,
           outputCount: selection.change > 0 ? 2 : 1,
           totalInput: selection.selected.reduce((s, u) => s + u.value, 0),
-          change: selection.change
+          change: selection.change,
+          changeValue: selection.change
+          // production alias
         };
       } catch (e) {
         return {
@@ -1411,6 +1462,8 @@ var __wdk_exports = (() => {
       const totalInput = utxos.reduce((s, u) => s + u.value, 0);
       return {
         maxSpendable,
+        amount: maxSpendable,
+        // production alias
         fee: totalInput - maxSpendable,
         utxoCount: utxos.length
       };
@@ -1456,7 +1509,7 @@ var __wdk_exports = (() => {
       }
       const btcPerKb = await this.client.estimateFee(3);
       const feeRate = Math.ceil(btcPerKb * 1e8 / 1e3);
-      const selection = selectUtxos(utxos, targetSats, feeRate);
+      const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH, to);
       if (!selection) {
         throw new Error("Insufficient funds");
       }
@@ -1637,6 +1690,9 @@ var __wdk_exports = (() => {
     },
     getReceipt(params) {
       return engine.dispatch("getReceipt", params);
+    },
+    getFeeRates(params) {
+      return engine.dispatch("getFeeRates", params);
     }
   };
   globalThis.wdk = wdk;
