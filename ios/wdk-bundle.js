@@ -1227,7 +1227,7 @@ var __wdk_exports = (() => {
       return satPerVb / 1e5;
     }
     async fetchJson(path) {
-      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      const response = await this.limiter.run(() => native.net.fetch(`${this.baseUrl}${path}`));
       if (response.status !== 200) {
         const body = response.body ? native.encoding.utf8Decode(response.body) : "";
         throw new Error(
@@ -1347,7 +1347,7 @@ var __wdk_exports = (() => {
     async getTransaction(txHash) {
       const cached = this.txCache.get(txHash);
       if (cached !== void 0) return cached;
-      const hex = await this.limiter.run(() => this.fetchText(`/tx/${txHash}/hex`));
+      const hex = await this.fetchText(`/tx/${txHash}/hex`);
       this.txCache.set(txHash, hex);
       return hex;
     }
@@ -1393,7 +1393,7 @@ var __wdk_exports = (() => {
     }
     // ── Private helpers ──────────────────────────────────────────────────────
     async fetchJson(path) {
-      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      const response = await this.limiter.run(() => native.net.fetch(`${this.baseUrl}${path}`));
       if (response.status !== 200) {
         const body = response.body ? native.encoding.utf8Decode(response.body) : "";
         throw new Error(
@@ -1404,7 +1404,7 @@ var __wdk_exports = (() => {
       return JSON.parse(bodyText);
     }
     async fetchText(path) {
-      const response = await native.net.fetch(`${this.baseUrl}${path}`);
+      const response = await this.limiter.run(() => native.net.fetch(`${this.baseUrl}${path}`));
       if (response.status !== 200) {
         const body = response.body ? native.encoding.utf8Decode(response.body) : "";
         throw new Error(
