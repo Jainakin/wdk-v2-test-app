@@ -2885,10 +2885,6 @@ var __wdk_exports = (() => {
     },
     disposeAccount(params) {
       return engine.dispatch("disposeAccount", params);
-    },
-    // ── Test-only: direct PSBT access for regtest verification ──
-    __buildAndSignPsbt(inputs, outputs, keyHandles) {
-      return buildAndSignPsbt(inputs, outputs, keyHandles);
     }
   };
   globalThis.wdk = wdk;
