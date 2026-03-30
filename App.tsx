@@ -226,6 +226,32 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       },
     },
 
+    // ── Transfers (paginated) ──────────────────────────────────────
+    {
+      name: 'getTransfers',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const result = await WDKWallet.getTransfers({chain: 'btc', address, limit: 3});
+        const ok = Array.isArray(result.transfers) && typeof result.hasMore === 'boolean';
+        return {
+          passed: ok,
+          detail: `${result.transfers.length} transfers, hasMore=${result.hasMore}`,
+        };
+      },
+    },
+    {
+      name: 'getTransfers_direction',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const sent = await WDKWallet.getTransfers({chain: 'btc', address, direction: 'sent'});
+        const allSent = sent.transfers.every(t => t.direction === 'sent');
+        return {
+          passed: allSent,
+          detail: `${sent.transfers.length} sent txs, all direction=sent: ${allSent}`,
+        };
+      },
+    },
+
     // ── History ───────────────────────────────────────────────────────
     {
       name: 'getHistory',

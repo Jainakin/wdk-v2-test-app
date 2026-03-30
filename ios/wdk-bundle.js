@@ -360,6 +360,19 @@ var __wdk_exports = (() => {
           if (!txHash) throw new StateError('Missing "txHash" parameter');
           return wallet.getTransactionReceipt(txHash);
         }
+        case "getTransfers": {
+          const address = params.address;
+          if (!address) throw new StateError('Missing "address" parameter');
+          if (typeof wallet.getTransfers === "function") {
+            return wallet.getTransfers(address, {
+              direction: params.direction,
+              limit: params.limit,
+              afterTxId: params.afterTxId,
+              page: params.page
+            });
+          }
+          throw new StateError("getTransfers not supported for this chain");
+        }
         case "signMessage": {
           const message = params.message;
           if (!message && message !== "") throw new StateError('Missing "message" parameter');
@@ -1024,8 +1037,8 @@ var __wdk_exports = (() => {
       }
       return data.result ?? "";
     }
-    async getDetailedHistory(address, limit = 25) {
-      const data = await this.fetchJson(`/api/v2/address/${address}?details=txs&pageSize=${limit}`);
+    async getDetailedHistory(address, limit = 25, _afterTxId, page = 1) {
+      const data = await this.fetchJson(`/api/v2/address/${address}?details=txs&pageSize=${limit}&page=${page}`);
       if (!data.transactions) return [];
       return data.transactions.map((tx) => {
         const inputAddresses = new Set(
@@ -1175,8 +1188,9 @@ var __wdk_exports = (() => {
         height: tx.status.block_height ?? 0
       }));
     }
-    async getDetailedHistory(address, limit = 25) {
-      const txs = await this.fetchJson(`/address/${address}/txs`);
+    async getDetailedHistory(address, limit = 25, afterTxId, _page) {
+      const endpoint = afterTxId ? `/address/${address}/txs/chain/${afterTxId}` : `/address/${address}/txs`;
+      const txs = await this.fetchJson(endpoint);
       return txs.slice(0, limit).map((tx) => {
         const inputAddresses = new Set(
           tx.vin.filter((v) => v.prevout?.scriptpubkey_address).map((v) => v.prevout.scriptpubkey_address)
@@ -1613,6 +1627,37 @@ var __wdk_exports = (() => {
       });
     }
     // -----------------------------------------------------------------------
+    // Paginated transfers (production parity: getTransfers)
+    // -----------------------------------------------------------------------
+    /**
+     * Get paginated, filterable transfer history.
+     * Matches production WDK's getTransfers({direction, limit, skip}).
+     *
+     * @param address  The Bitcoin address to query
+     * @param query    Optional: direction filter, limit, pagination cursor
+     * @returns transfers array + hasMore flag + nextCursor for pagination
+     */
+    async getTransfers(address, query) {
+      const limit = query?.limit ?? 25;
+      const detailed = await this.client.getDetailedHistory(
+        address,
+        limit,
+        query?.afterTxId,
+        query?.page
+      );
+      let filtered = detailed;
+      if (query?.direction && query.direction !== "all") {
+        filtered = detailed.filter((tx) => tx.direction === query.direction);
+      }
+      const transfers = filtered.map((tx) => ({
+        ...tx,
+        counterparties: [...new Set(tx.counterparties)]
+      }));
+      const hasMore = detailed.length >= limit;
+      const nextCursor = detailed.length > 0 ? detailed[detailed.length - 1].txHash : void 0;
+      return { transfers, hasMore, nextCursor };
+    }
+    // -----------------------------------------------------------------------
     // Transaction receipt
     // -----------------------------------------------------------------------
     /**
@@ -1869,6 +1914,9 @@ var __wdk_exports = (() => {
     },
     getFeeRates(params) {
       return engine.dispatch("getFeeRates", params);
+    },
+    getTransfers(params) {
+      return engine.dispatch("getTransfers", params);
     },
     signMessage(params) {
       return engine.dispatch("signMessage", params);
