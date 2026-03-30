@@ -316,10 +316,11 @@ var __wdk_exports = (() => {
         }
         case "send": {
           const sendIndex = params.index ?? 0;
+          const sendAddressType = params.addressType;
           const senderKeyHandle = this.keys.deriveAndTrack(
-            wallet.getDerivationPath(sendIndex)
+            wallet.getDerivationPath(sendIndex, sendAddressType)
           );
-          const senderAddress = await wallet.getAddress(senderKeyHandle, sendIndex);
+          const senderAddress = await wallet.getAddress(senderKeyHandle, sendIndex, sendAddressType);
           const txParams = {
             ...params,
             from: senderAddress
@@ -372,8 +373,9 @@ var __wdk_exports = (() => {
           const message = params.message;
           if (!message && message !== "") throw new StateError('Missing "message" parameter');
           const signIndex = params.index ?? 0;
+          const signAddrType = params.addressType;
           const msgKeyHandle = this.keys.deriveAndTrack(
-            wallet.getDerivationPath(signIndex)
+            wallet.getDerivationPath(signIndex, signAddrType)
           );
           return wallet.signMessage(msgKeyHandle, message);
         }
@@ -2371,13 +2373,24 @@ var __wdk_exports = (() => {
       const sha = native.crypto.sha256(recoveredPubkey);
       const hash160 = native.crypto.ripemd160(sha);
       const data5 = convertBits(hash160, 8, 5, true);
-      if (!data5) return false;
-      const hrp = this.network === "regtest" ? "bcrt" : this.isTestnet ? "tb" : "bc";
-      const witnessData = new Uint8Array(1 + data5.length);
-      witnessData[0] = 0;
-      witnessData.set(data5, 1);
-      const derivedAddress = native.encoding.bech32Encode(hrp, witnessData);
-      return derivedAddress === address;
+      if (data5) {
+        const hrp = this.network === "regtest" ? "bcrt" : this.isTestnet ? "tb" : "bc";
+        const witnessData = new Uint8Array(1 + data5.length);
+        witnessData[0] = 0;
+        witnessData.set(data5, 1);
+        const segwitAddr = native.encoding.bech32Encode(hrp, witnessData);
+        if (segwitAddr === address) return true;
+      }
+      const version = this.isTestnet ? 111 : 0;
+      const payload = new Uint8Array(21);
+      payload[0] = version;
+      payload.set(hash160, 1);
+      try {
+        const legacyAddr = native.encoding.base58CheckEncode(payload);
+        if (legacyAddr === address) return true;
+      } catch {
+      }
+      return false;
     }
     // ── Bitcoin Signed Message helpers ──
     bitcoinMessageHash(message) {
