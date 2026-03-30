@@ -2218,29 +2218,25 @@ var __wdk_exports = (() => {
     // -----------------------------------------------------------------------
     /**
      * Fetch transaction history with full parsed details.
-     * Uses IBtcClient.getDetailedHistory() which returns direction, amounts,
-     * fees, counterparties — parsed from full transaction data.
+     * Delegates to getTransfers() (production-compatible) and maps to TxRecord[].
+     * This is the BaseWallet contract; getTransfers() is the production-parity API.
      */
     async getTransactionHistory(address, limit = 25) {
-      const detailed = await this.client.getDetailedHistory(address, limit);
-      return detailed.map((tx) => {
-        const uniqueCounterparties = [...new Set(tx.counterparties)];
-        return {
-          txHash: tx.txHash,
-          chain: "btc",
-          // Primary from/to for backwards compat (first counterparty)
-          from: tx.direction === "received" ? uniqueCounterparties[0] ?? "" : address,
-          to: tx.direction === "sent" ? uniqueCounterparties[0] ?? "" : address,
-          amount: String(Math.abs(tx.amount)),
-          fee: String(tx.fee),
-          direction: tx.direction,
-          // Full counterparty list (deduplicated)
-          counterparties: uniqueCounterparties,
-          timestamp: tx.timestamp,
-          status: tx.confirmed ? "confirmed" : "pending",
-          blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
-        };
-      });
+      const result = await this.getTransfers(address, { limit });
+      return result.transfers.map((tx) => ({
+        txHash: tx.txHash,
+        chain: "btc",
+        // Primary from/to for backwards compat (first counterparty)
+        from: tx.direction === "received" ? tx.counterparties[0] ?? "" : address,
+        to: tx.direction === "sent" ? tx.counterparties[0] ?? "" : address,
+        amount: String(Math.abs(tx.amount)),
+        fee: String(tx.fee),
+        direction: tx.direction,
+        counterparties: tx.counterparties,
+        timestamp: tx.timestamp,
+        status: tx.confirmed ? "confirmed" : "pending",
+        blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
+      }));
     }
     // -----------------------------------------------------------------------
     // Paginated transfers (production parity: getTransfers)
@@ -2265,10 +2261,25 @@ var __wdk_exports = (() => {
       if (query?.direction && query.direction !== "all") {
         filtered = detailed.filter((tx) => tx.direction === query.direction);
       }
-      const transfers = filtered.map((tx) => ({
-        ...tx,
-        counterparties: [...new Set(tx.counterparties)]
-      }));
+      const transfers = [];
+      for (const tx of filtered) {
+        const uniqueCounterparties = [...new Set(tx.counterparties)];
+        if (uniqueCounterparties.length <= 1) {
+          transfers.push({
+            ...tx,
+            counterparties: uniqueCounterparties
+          });
+        } else {
+          for (const cp of uniqueCounterparties) {
+            transfers.push({
+              ...tx,
+              counterparties: [cp]
+              // Note: amount is the total tx amount, not per-counterparty.
+              // Production splits amounts per-output; we keep total for simplicity.
+            });
+          }
+        }
+      }
       const hasMore = detailed.length >= limit;
       const nextCursor = detailed.length > 0 ? detailed[detailed.length - 1].txHash : void 0;
       return { transfers, hasMore, nextCursor };
