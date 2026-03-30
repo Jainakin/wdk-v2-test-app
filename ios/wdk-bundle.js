@@ -360,6 +360,30 @@ var __wdk_exports = (() => {
           if (!txHash) throw new StateError('Missing "txHash" parameter');
           return wallet.getTransactionReceipt(txHash);
         }
+        case "signMessage": {
+          const message = params.message;
+          if (!message && message !== "") throw new StateError('Missing "message" parameter');
+          const signIndex = params.index ?? 0;
+          const msgKeyHandle = this.keys.deriveAndTrack(
+            wallet.getDerivationPath(signIndex)
+          );
+          if (typeof wallet.signMessage === "function") {
+            return wallet.signMessage(message, msgKeyHandle);
+          }
+          throw new StateError("signMessage not supported for this chain");
+        }
+        case "verifyMessage": {
+          const message = params.message;
+          const signature = params.signature;
+          const address = params.address;
+          if (!message && message !== "") throw new StateError('Missing "message" parameter');
+          if (!signature) throw new StateError('Missing "signature" parameter');
+          if (!address) throw new StateError('Missing "address" parameter');
+          if (typeof wallet.verifyMessage === "function") {
+            return wallet.verifyMessage(message, signature, address);
+          }
+          throw new StateError("verifyMessage not supported for this chain");
+        }
         default:
           throw new StateError(`Unknown action: ${action}`);
       }
@@ -937,8 +961,6 @@ var __wdk_exports = (() => {
     }
     async reconnect() {
       this.txCache.clear();
-    }
-    async reconnect() {
     }
     async getBalance(address) {
       const data = await this.fetchJson(`/api/v2/address/${address}?details=basic`);
@@ -1601,6 +1623,160 @@ var __wdk_exports = (() => {
       return this.client.getTxStatus(txHash);
     }
     // -----------------------------------------------------------------------
+    // Message signing (Bitcoin Signed Message format)
+    // -----------------------------------------------------------------------
+    /**
+     * Sign a message using the Bitcoin Signed Message standard.
+     * Compatible with bitcoinjs-message / Electrum / Bitcoin Core signmessage.
+     *
+     * Format: double-SHA256 of "\x18Bitcoin Signed Message:\n" + varint(len) + message
+     * Output: base64-encoded 65-byte signature (1 flag byte + 32r + 32s)
+     *
+     * @param message    The message string to sign
+     * @param keyHandle  Key handle for the signing key
+     * @returns base64-encoded signature string
+     */
+    async signMessage(message, keyHandle) {
+      const msgHash = this.bitcoinMessageHash(message);
+      const recoverableSig = native.crypto.signRecoverableSecp256k1(keyHandle, msgHash);
+      const recid = recoverableSig[64];
+      const flagByte = 27 + 4 + recid;
+      const result = new Uint8Array(65);
+      result[0] = flagByte;
+      result.set(recoverableSig.slice(0, 64), 1);
+      return this.uint8ArrayToBase64(result);
+    }
+    /**
+     * Verify a Bitcoin Signed Message against an address.
+     * Recovers the public key from the signature, derives the address,
+     * and compares to the expected address.
+     *
+     * @param message    The original message string
+     * @param signature  base64-encoded 65-byte signature
+     * @param address    The expected Bitcoin address
+     * @returns true if the signature is valid for this address
+     */
+    async verifyMessage(message, signature, address) {
+      const sigBytes = this.base64ToUint8Array(signature);
+      if (sigBytes.length !== 65) return false;
+      const flagByte = sigBytes[0];
+      const recid = flagByte - 27 & 3;
+      const compressed = (flagByte - 27 & 4) !== 0;
+      if (!compressed) return false;
+      const recoverableSig = new Uint8Array(65);
+      recoverableSig.set(sigBytes.slice(1, 65), 0);
+      recoverableSig[64] = recid;
+      const msgHash = this.bitcoinMessageHash(message);
+      let recoveredPubkey;
+      try {
+        recoveredPubkey = native.crypto.recoverSecp256k1(msgHash, recoverableSig);
+      } catch {
+        return false;
+      }
+      const sha = native.crypto.sha256(recoveredPubkey);
+      const hash160 = native.crypto.ripemd160(sha);
+      const data5 = convertBits(hash160, 8, 5, true);
+      if (!data5) return false;
+      const hrp = this.network === "regtest" ? "bcrt" : this.isTestnet ? "tb" : "bc";
+      const witnessData = new Uint8Array(1 + data5.length);
+      witnessData[0] = 0;
+      witnessData.set(data5, 1);
+      const derivedAddress = native.encoding.bech32Encode(hrp, witnessData);
+      return derivedAddress === address;
+    }
+    // ── Bitcoin Signed Message helpers ──
+    bitcoinMessageHash(message) {
+      const prefix = new Uint8Array([
+        24,
+        // length of "Bitcoin Signed Message:\n"
+        66,
+        105,
+        116,
+        99,
+        111,
+        105,
+        110,
+        32,
+        // "Bitcoin "
+        83,
+        105,
+        103,
+        110,
+        101,
+        100,
+        32,
+        // "Signed "
+        77,
+        101,
+        115,
+        115,
+        97,
+        103,
+        101,
+        58,
+        // "Message:"
+        10
+        // "\n"
+      ]);
+      const msgBytes = native.encoding.utf8Encode(message);
+      const varint = this.encodeVarint(msgBytes.length);
+      const payload = new Uint8Array(prefix.length + varint.length + msgBytes.length);
+      payload.set(prefix, 0);
+      payload.set(varint, prefix.length);
+      payload.set(msgBytes, prefix.length + varint.length);
+      return native.crypto.sha256(native.crypto.sha256(payload));
+    }
+    encodeVarint(n) {
+      if (n < 253) return new Uint8Array([n]);
+      if (n <= 65535) {
+        const buf2 = new Uint8Array(3);
+        buf2[0] = 253;
+        buf2[1] = n & 255;
+        buf2[2] = n >> 8 & 255;
+        return buf2;
+      }
+      const buf = new Uint8Array(5);
+      buf[0] = 254;
+      buf[1] = n & 255;
+      buf[2] = n >> 8 & 255;
+      buf[3] = n >> 16 & 255;
+      buf[4] = n >> 24 & 255;
+      return buf;
+    }
+    uint8ArrayToBase64(data) {
+      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      let result = "";
+      for (let i = 0; i < data.length; i += 3) {
+        const a = data[i];
+        const b = i + 1 < data.length ? data[i + 1] : 0;
+        const c = i + 2 < data.length ? data[i + 2] : 0;
+        result += chars[a >> 2 & 63];
+        result += chars[(a << 4 | b >> 4) & 63];
+        result += i + 1 < data.length ? chars[(b << 2 | c >> 6) & 63] : "=";
+        result += i + 2 < data.length ? chars[c & 63] : "=";
+      }
+      return result;
+    }
+    base64ToUint8Array(base64) {
+      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      const lookup = /* @__PURE__ */ new Map();
+      for (let i = 0; i < chars.length; i++) lookup.set(chars[i], i);
+      const clean = base64.replace(/=/g, "");
+      const outLen = Math.floor(clean.length * 3 / 4);
+      const result = new Uint8Array(outLen);
+      let j = 0;
+      for (let i = 0; i < clean.length; i += 4) {
+        const a = lookup.get(clean[i]) ?? 0;
+        const b = lookup.get(clean[i + 1]) ?? 0;
+        const c = lookup.get(clean[i + 2]) ?? 0;
+        const d = lookup.get(clean[i + 3]) ?? 0;
+        result[j++] = a << 2 | b >> 4;
+        if (j < outLen) result[j++] = (b << 4 | c >> 2) & 255;
+        if (j < outLen) result[j++] = (c << 6 | d) & 255;
+      }
+      return result;
+    }
+    // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
     destroy() {
@@ -1693,6 +1869,12 @@ var __wdk_exports = (() => {
     },
     getFeeRates(params) {
       return engine.dispatch("getFeeRates", params);
+    },
+    signMessage(params) {
+      return engine.dispatch("signMessage", params);
+    },
+    verifyMessage(params) {
+      return engine.dispatch("verifyMessage", params);
     }
   };
   globalThis.wdk = wdk;

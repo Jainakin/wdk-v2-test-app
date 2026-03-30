@@ -189,6 +189,43 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       },
     },
 
+    // ── Message signing ──────────────────────────────────────────────
+    {
+      name: 'signMessage',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const sig = await WDKWallet.signMessage({
+          chain: 'btc', message: 'Hello WDK v2', index: 0,
+        });
+        const ok = typeof sig === 'string' && sig.length > 0;
+        return {passed: ok, detail: `sig=${sig.slice(0, 20)}...`};
+      },
+    },
+    {
+      name: 'verifyMessage',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        // Sign then verify
+        const msg = 'Test verification message';
+        const sig = await WDKWallet.signMessage({chain: 'btc', message: msg, index: 0});
+        const valid = await WDKWallet.verifyMessage({
+          chain: 'btc', message: msg, signature: sig, address,
+        });
+        return {passed: valid === true, detail: `valid=${valid}`};
+      },
+    },
+    {
+      name: 'verifyMessage_wrong_msg',
+      fn: async () => {
+        if (!address) return {passed: false, detail: 'no address'};
+        const sig = await WDKWallet.signMessage({chain: 'btc', message: 'correct', index: 0});
+        const valid = await WDKWallet.verifyMessage({
+          chain: 'btc', message: 'wrong', signature: sig, address,
+        });
+        return {passed: valid === false, detail: `correctly rejected: valid=${valid}`};
+      },
+    },
+
     // ── History ───────────────────────────────────────────────────────
     {
       name: 'getHistory',
