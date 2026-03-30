@@ -1935,10 +1935,17 @@ var __wdk_exports = (() => {
       this.coinType = this.network === "bitcoin" ? 0 : 1;
       if (config.btcClient) {
         this.client = createClient(config.btcClient, this.network);
+        await this.client.connect();
       } else {
-        this.client = new MempoolRestClient(this.network);
+        try {
+          const electrum = new ElectrumWsClient(this.network);
+          await electrum.connect();
+          this.client = electrum;
+        } catch {
+          this.client = new MempoolRestClient(this.network);
+          await this.client.connect();
+        }
       }
-      await this.client.connect();
     }
     /**
      * BTC native SegWit (P2WPKH) uses BIP-84: m/84'/coinType'/account'/change/index
