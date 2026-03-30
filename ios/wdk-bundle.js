@@ -2187,7 +2187,7 @@ var __wdk_exports = (() => {
     // ── Balance ────────────────────────────────────────────────────────────
     async getBalance() {
       const balance = await this.client.getBalance(this.address);
-      return String(balance.confirmed);
+      return String(balance.confirmed + balance.unconfirmed);
     }
     // ── Fee rates ──────────────────────────────────────────────────────────
     async getFeeRates() {
@@ -2418,7 +2418,7 @@ var __wdk_exports = (() => {
     // ── Read-only operations (delegate to shared client) ────────────────────
     async getBalance() {
       const balance = await this.client.getBalance(this.address);
-      return String(balance.confirmed);
+      return String(balance.confirmed + balance.unconfirmed);
     }
     async getFeeRates() {
       const [fast, medium, slow] = await Promise.all([

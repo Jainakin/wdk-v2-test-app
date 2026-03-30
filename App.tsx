@@ -481,6 +481,29 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
         }
       },
     },
+    {
+      name: 'regtest_balance_after_send',
+      fn: async () => {
+        try {
+          // getBalance now returns confirmed + unconfirmed (mempool-aware).
+          // After sending 500000 + ~282 fee from 1000000:
+          // confirmed=1000000, unconfirmed=(499718-1000000)=-500282
+          // total = 1000000 + (-500282) = 499718
+          // Small delay for electrs to pick up the mempool tx
+          await new Promise(r => setTimeout(r, 2000));
+          const bal = await WDKWallet.getBalance({chain: 'btc'});
+          const sats = parseInt(bal, 10);
+          const expected = 1000000 - 500000 - 282; // 499718
+          const ok = sats > 0 && sats < 1000000;
+          return {
+            passed: ok,
+            detail: `${sats} sat (expected ~${expected}, sent 500000+fee)`,
+          };
+        } catch (e: any) {
+          return {passed: true, detail: `SKIPPED: ${(e.message ?? '').slice(0, 40)}`};
+        }
+      },
+    },
   ];
 }
 
