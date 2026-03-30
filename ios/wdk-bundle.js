@@ -414,7 +414,8 @@ var __wdk_exports = (() => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
       });
-      const json = JSON.parse(native.encoding.utf8Decode(response.body));
+      const bodyText = response.body ? native.encoding.utf8Decode(response.body) : "{}";
+      const json = JSON.parse(bodyText);
       if (json.error) throw new Error(json.error.message);
       return json.result;
     }
@@ -1079,8 +1080,8 @@ var __wdk_exports = (() => {
   var BASE_URLS2 = {
     bitcoin: "https://mempool.space/api",
     testnet: "https://mempool.space/testnet4/api",
-    regtest: "https://mempool.space/api"
-    // regtest needs user-provided URL
+    regtest: ""
+    // regtest MUST use a user-provided URL
   };
   var MempoolRestClient = class {
     constructor(network = "bitcoin", customUrl) {
@@ -1088,6 +1089,9 @@ var __wdk_exports = (() => {
       this.txCache = new LRUCache(100);
       /** Concurrency limiter for parallel requests (matches production pLimit(8)) */
       this.limiter = new ConcurrencyLimiter(8);
+      if (network === "regtest" && !customUrl) {
+        throw new Error("MempoolRestClient: regtest requires a custom URL (e.g. http://localhost:3000/api)");
+      }
       this.baseUrl = customUrl ? customUrl.replace(/\/$/, "") : BASE_URLS2[network];
     }
     async connect() {
@@ -1585,23 +1589,7 @@ var __wdk_exports = (() => {
      * Throws StateError if called before unlockWallet().
      */
     getBtcAddress(params) {
-      const index = params.index ?? 0;
-      const btcConfig = engine.getConfig().networks["btc"];
-      const coinType = btcConfig?.isTestnet ? 1 : 0;
-      const keyHandle = engine.getKeyManager().deriveAndTrack(
-        `m/84'/${coinType}'/0'/0/${index}`
-      );
-      const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
-      const sha = native.crypto.sha256(pubkey);
-      const hash160 = native.crypto.ripemd160(sha);
-      const fiveBit = convertBits2(hash160, 8, 5, true);
-      if (!fiveBit) return { error: "bit conversion failed" };
-      const witnessProgram = new Uint8Array(1 + fiveBit.length);
-      witnessProgram[0] = 0;
-      witnessProgram.set(fiveBit, 1);
-      const hrp = btcConfig?.isTestnet ? "tb" : "bc";
-      const address = native.encoding.bech32Encode(hrp, witnessProgram);
-      return { address };
+      return engine.dispatch("getAddress", { chain: "btc", index: params.index ?? 0 });
     },
     // ── Configuration ──
     /**
@@ -1651,29 +1639,5 @@ var __wdk_exports = (() => {
       return engine.dispatch("getReceipt", params);
     }
   };
-  function convertBits2(data, fromBits, toBits, pad) {
-    let acc = 0;
-    let bits = 0;
-    const ret = [];
-    const maxv = (1 << toBits) - 1;
-    for (let i = 0; i < data.length; i++) {
-      const value = data[i];
-      if (value < 0 || value >> fromBits !== 0) return null;
-      acc = acc << fromBits | value;
-      bits += fromBits;
-      while (bits >= toBits) {
-        bits -= toBits;
-        ret.push(acc >> bits & maxv);
-      }
-    }
-    if (pad) {
-      if (bits > 0) {
-        ret.push(acc << toBits - bits & maxv);
-      }
-    } else if (bits >= fromBits || (acc << toBits - bits & maxv) !== 0) {
-      return null;
-    }
-    return new Uint8Array(ret);
-  }
   globalThis.wdk = wdk;
 })();
