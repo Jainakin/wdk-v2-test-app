@@ -351,10 +351,7 @@ var __wdk_exports = (() => {
           return wallet.getMaxSpendable(address);
         }
         case "getFeeRates": {
-          if (typeof wallet.getFeeRates === "function") {
-            return wallet.getFeeRates();
-          }
-          throw new StateError("getFeeRates not supported for this chain");
+          return wallet.getFeeRates();
         }
         case "getReceipt": {
           const txHash = params.txHash;
@@ -364,15 +361,12 @@ var __wdk_exports = (() => {
         case "getTransfers": {
           const address = params.address;
           if (!address) throw new StateError('Missing "address" parameter');
-          if (typeof wallet.getTransfers === "function") {
-            return wallet.getTransfers(address, {
-              direction: params.direction,
-              limit: params.limit,
-              afterTxId: params.afterTxId,
-              page: params.page
-            });
-          }
-          throw new StateError("getTransfers not supported for this chain");
+          return wallet.getTransfers(address, {
+            direction: params.direction,
+            limit: params.limit,
+            afterTxId: params.afterTxId,
+            page: params.page
+          });
         }
         case "signMessage": {
           const message = params.message;
@@ -381,10 +375,7 @@ var __wdk_exports = (() => {
           const msgKeyHandle = this.keys.deriveAndTrack(
             wallet.getDerivationPath(signIndex)
           );
-          if (typeof wallet.signMessage === "function") {
-            return wallet.signMessage(message, msgKeyHandle);
-          }
-          throw new StateError("signMessage not supported for this chain");
+          return wallet.signMessage(msgKeyHandle, message);
         }
         case "verifyMessage": {
           const message = params.message;
@@ -393,10 +384,7 @@ var __wdk_exports = (() => {
           if (!message && message !== "") throw new StateError('Missing "message" parameter');
           if (!signature) throw new StateError('Missing "signature" parameter');
           if (!address) throw new StateError('Missing "address" parameter');
-          if (typeof wallet.verifyMessage === "function") {
-            return wallet.verifyMessage(message, signature, address);
-          }
-          throw new StateError("verifyMessage not supported for this chain");
+          return wallet.verifyMessage(message, signature, address);
         }
         default:
           throw new StateError(`Unknown action: ${action}`);
@@ -445,6 +433,23 @@ var __wdk_exports = (() => {
      */
     getDerivationPath(index, _addressType) {
       return `m/44'/${this.coinType}'/0'/0/${index}`;
+    }
+    // ── Optional capabilities (override in chain modules that support them) ──
+    /** Get fee rate estimates — override in chains that support it */
+    async getFeeRates() {
+      throw new Error(`getFeeRates not supported for chain ${this.chainId}`);
+    }
+    /** Get paginated transfers with direction filter — override in chains that support it */
+    async getTransfers(_address, _query) {
+      throw new Error(`getTransfers not supported for chain ${this.chainId}`);
+    }
+    /** Sign a message — override in chains that support message signing */
+    async signMessage(_keyHandle, _message) {
+      throw new Error(`signMessage not supported for chain ${this.chainId}`);
+    }
+    /** Verify a signed message — override in chains that support it */
+    async verifyMessage(_message, _signature, _address) {
+      throw new Error(`verifyMessage not supported for chain ${this.chainId}`);
     }
     /** Cleanup resources */
     destroy() {
@@ -1990,11 +1995,15 @@ var __wdk_exports = (() => {
         this.client.estimateFee(6)
       ]);
       const toSatVb = (btcPerKb) => Math.ceil(btcPerKb * 1e8 / 1e3);
-      return {
+      const rates = {
         fast: toSatVb(fast),
         medium: toSatVb(medium),
-        slow: toSatVb(slow)
+        slow: toSatVb(slow),
+        // Production aliases (production returns { normal, fast } as BigInt)
+        normal: toSatVb(medium)
+        // production 'normal' = our 'medium'
       };
+      return rates;
     }
     // -----------------------------------------------------------------------
     // Quote + Max Spendable (production parity: quoteSendTransaction, getMaxSpendable)
@@ -2311,7 +2320,7 @@ var __wdk_exports = (() => {
      * @param keyHandle  Key handle for the signing key
      * @returns base64-encoded signature string
      */
-    async signMessage(message, keyHandle) {
+    async signMessage(keyHandle, message) {
       const msgHash = this.bitcoinMessageHash(message);
       const recoverableSig = native.crypto.signRecoverableSecp256k1(keyHandle, msgHash);
       const recid = recoverableSig[64];
