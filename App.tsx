@@ -55,7 +55,7 @@ function tlogFlush() {
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const TEST_MNEMONIC =
-  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+  'stock art merge family various matter cost banner switch illegal obvious decline';
 
 // ── Test Logger ─────────────────────────────────────────────────────────────
 
