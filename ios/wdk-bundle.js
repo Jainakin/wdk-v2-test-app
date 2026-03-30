@@ -750,6 +750,9 @@ var __wdk_exports = (() => {
   function addWitnessUtxo(psbt, inputIndex, amount, scriptPubKey) {
     psbt.inputs[inputIndex].witnessUtxo = { amount, scriptPubKey };
   }
+  function addNonWitnessUtxo(psbt, inputIndex, rawTx) {
+    psbt.inputs[inputIndex].nonWitnessUtxo = rawTx;
+  }
   function signInput(psbt, inputIndex, keyHandle) {
     const { inputs, outputs } = psbt.unsignedTx;
     const input = psbt.inputs[inputIndex];
@@ -963,7 +966,11 @@ var __wdk_exports = (() => {
     for (let i = 0; i < inputs.length; i++) {
       const spk = inputs[i].scriptPubKey ? native.encoding.hexDecode(inputs[i].scriptPubKey) : addressToScriptPubKey(inputs[i].address ?? "");
       if (spk.length === 25 && spk[0] === 118) {
-        addWitnessUtxo(psbt, i, inputs[i].value, spk);
+        if (inputs[i].prevTxHex) {
+          addNonWitnessUtxo(psbt, i, native.encoding.hexDecode(inputs[i].prevTxHex));
+        } else {
+          addWitnessUtxo(psbt, i, inputs[i].value, spk);
+        }
       } else {
         addWitnessUtxo(psbt, i, inputs[i].value, spk);
       }
@@ -1135,6 +1142,12 @@ var __wdk_exports = (() => {
         throw new Error(`Broadcast failed: ${data.error}`);
       }
       return data.result ?? "";
+    }
+    async getBlockHeight() {
+      const data = await this.fetchJson(
+        "/api/v2"
+      );
+      return data.blockbook?.bestHeight ?? 0;
     }
     async getDetailedHistory(address, limit = 25, _afterTxId, page = 1) {
       const data = await this.fetchJson(`/api/v2/address/${address}?details=txs&pageSize=${limit}&page=${page}`);
@@ -1391,6 +1404,10 @@ var __wdk_exports = (() => {
       }
       return satPerVb * 1e3 / 1e8;
     }
+    async getBlockHeight() {
+      const text = await this.fetchText("/blocks/tip/height");
+      return parseInt(text, 10) || 0;
+    }
     // ── Private helpers ──────────────────────────────────────────────────────
     async fetchJson(path) {
       const response = await this.limiter.run(() => native.net.fetch(`${this.baseUrl}${path}`));
@@ -1632,6 +1649,10 @@ var __wdk_exports = (() => {
         this.reconnecting = false;
         try {
           await this.connect(this.url);
+          for (const [method] of this.subscriptions) {
+            const handler = this.subscriptions.get("_reconnect");
+            if (handler) handler([]);
+          }
         } catch {
         }
       }, delay);
@@ -1664,6 +1685,14 @@ var __wdk_exports = (() => {
           if (handler) handler(status);
         }
       );
+      this.transport.onNotification("_reconnect", async () => {
+        for (const [scripthash] of this.activeSubscriptions) {
+          try {
+            await this.transport.request("blockchain.scripthash.subscribe", [scripthash]);
+          } catch {
+          }
+        }
+      });
     }
     async close() {
       this.transport.close();
@@ -1818,6 +1847,16 @@ var __wdk_exports = (() => {
         fee: tx.fee ?? 0
       };
     }
+    async getBlockHeight() {
+      try {
+        const result = await this.limiter.run(
+          () => this.transport.request("blockchain.headers.subscribe", [])
+        );
+        return result.height ?? 0;
+      } catch {
+        return 0;
+      }
+    }
     // ── Subscription support ────────────────────────────────────────────────
     /**
      * Subscribe to address balance changes.
@@ -1841,7 +1880,14 @@ var __wdk_exports = (() => {
     }
     // ── Helpers ─────────────────────────────────────────────────────────────
     async getBlockHeightForTx(txHash) {
-      return 0;
+      try {
+        const tx = await this.limiter.run(
+          () => this.transport.request("blockchain.transaction.get", [txHash, true])
+        );
+        return tx.blockheight ?? tx.block_height ?? 0;
+      } catch {
+        return 0;
+      }
     }
   };
 
@@ -2089,12 +2135,26 @@ var __wdk_exports = (() => {
       if (!selection) {
         throw new Error("Insufficient funds");
       }
-      const inputs = selection.selected.map((u) => ({
-        txid: u.txid,
-        vout: u.vout,
-        value: u.value,
-        scriptPubKey: u.scriptPubKey
-      }));
+      const spkBytes = native.encoding.hexDecode(senderScriptPubKey);
+      const isLegacy = spkBytes.length === 25 && spkBytes[0] === 118;
+      const inputs = await Promise.all(
+        selection.selected.map(async (u) => {
+          const input = {
+            txid: u.txid,
+            vout: u.vout,
+            value: u.value,
+            scriptPubKey: u.scriptPubKey,
+            address: fromAddress
+          };
+          if (isLegacy) {
+            try {
+              input.prevTxHex = await this.client.getTransaction(u.txid);
+            } catch {
+            }
+          }
+          return input;
+        })
+      );
       const outputs = [
         { address: to, value: targetSats }
       ];
@@ -2207,7 +2267,15 @@ var __wdk_exports = (() => {
     async getTransactionReceipt(txHash) {
       try {
         const status = await this.client.getTxStatus(txHash);
-        const confirmations = status.confirmed ? 1 : 0;
+        let confirmations = 0;
+        if (status.confirmed && status.blockHeight > 0) {
+          try {
+            const tipHeight = await this.client.getBlockHeight();
+            confirmations = tipHeight > 0 ? tipHeight - status.blockHeight + 1 : 1;
+          } catch {
+            confirmations = 1;
+          }
+        }
         let rawTx;
         try {
           rawTx = await this.client.getTransaction(txHash);
