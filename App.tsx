@@ -132,6 +132,18 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       },
     },
 
+    // ── BIP-44 Legacy Address ─────────────────────────────────────────
+    {
+      name: 'getAddress_legacy',
+      fn: async () => {
+        const result = await WDKWallet.getAddress({chain: 'btc', addressType: 'p2pkh'});
+        const addr = typeof result === 'string' ? result : (result as any).address ?? '';
+        // Testnet P2PKH addresses start with 'm' or 'n'
+        const ok = addr.startsWith('m') || addr.startsWith('n');
+        return {passed: ok, detail: addr.slice(0, 40)};
+      },
+    },
+
     // ── Balance ───────────────────────────────────────────────────────
     {
       name: 'getBalance',

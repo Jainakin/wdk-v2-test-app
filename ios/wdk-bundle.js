@@ -303,10 +303,11 @@ var __wdk_exports = (() => {
       switch (action) {
         case "getAddress": {
           const index = params.index ?? 0;
+          const addressType = params.addressType;
           const keyHandle = this.keys.deriveAndTrack(
-            wallet.getDerivationPath(index)
+            wallet.getDerivationPath(index, addressType)
           );
-          return wallet.getAddress(keyHandle, index);
+          return wallet.getAddress(keyHandle, index, addressType);
         }
         case "getBalance": {
           const address = params.address;
@@ -442,7 +443,7 @@ var __wdk_exports = (() => {
      * Override in chain modules that use a non-BIP-44 standard.
      * e.g. Bitcoin SegWit uses BIP-84: m/84'/coinType'/0'/0/index
      */
-    getDerivationPath(index) {
+    getDerivationPath(index, _addressType) {
       return `m/44'/${this.coinType}'/0'/0/${index}`;
     }
     /** Cleanup resources */
@@ -503,6 +504,16 @@ var __wdk_exports = (() => {
     witnessData[0] = 0;
     witnessData.set(data5, 1);
     return native.encoding.bech32Encode(hrp, witnessData);
+  }
+  function generateLegacyAddress(keyHandle, isTestnet = false) {
+    const pubkey = native.crypto.getPublicKey(keyHandle, "secp256k1");
+    const sha = native.crypto.sha256(pubkey);
+    const hash160 = native.crypto.ripemd160(sha);
+    const version = isTestnet ? 111 : 0;
+    const payload = new Uint8Array(21);
+    payload[0] = version;
+    payload.set(hash160, 1);
+    return native.encoding.base58CheckEncode(payload);
   }
 
   // ../wdk-v2-wallet-btc/src/utxo.ts
@@ -1454,15 +1465,20 @@ var __wdk_exports = (() => {
     }
     /**
      * BTC native SegWit (P2WPKH) uses BIP-84: m/84'/coinType'/account'/change/index
+     * BTC legacy (P2PKH) uses BIP-44: m/44'/coinType'/account'/change/index
      * coinType is set dynamically in initialize(): 0 for mainnet, 1 for testnet.
      */
-    getDerivationPath(index) {
-      return `m/84'/${this.coinType}'/0'/0/${index}`;
+    getDerivationPath(index, addressType) {
+      const purpose = addressType === "p2pkh" ? 44 : 84;
+      return `m/${purpose}'/${this.coinType}'/0'/0/${index}`;
     }
     // -----------------------------------------------------------------------
     // Address
     // -----------------------------------------------------------------------
-    async getAddress(keyHandle, _index) {
+    async getAddress(keyHandle, _index, addressType) {
+      if (addressType === "p2pkh") {
+        return generateLegacyAddress(keyHandle, this.isTestnet);
+      }
       return generateSegwitAddress(keyHandle, this.isTestnet, this.network);
     }
     // -----------------------------------------------------------------------
