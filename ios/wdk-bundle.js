@@ -1531,6 +1531,7 @@ var __wdk_exports = (() => {
           outputCount: 0,
           totalInput: 0,
           change: 0,
+          changeValue: 0,
           error: `Invalid amount: ${params.amount}`
         };
       }
@@ -1555,6 +1556,7 @@ var __wdk_exports = (() => {
             outputCount: 0,
             totalInput: utxos.reduce((s, u) => s + u.value, 0),
             change: 0,
+            changeValue: 0,
             error: "Insufficient funds"
           };
         }
@@ -1578,6 +1580,7 @@ var __wdk_exports = (() => {
           outputCount: 0,
           totalInput: 0,
           change: 0,
+          changeValue: 0,
           error: e.message ?? String(e)
         };
       }
@@ -1605,6 +1608,8 @@ var __wdk_exports = (() => {
         amount: maxSpendable,
         // production alias
         fee: totalInput - maxSpendable,
+        changeValue: 0,
+        // max-spend has no change
         utxoCount: utxos.length
       };
     }
@@ -1769,7 +1774,22 @@ var __wdk_exports = (() => {
      * Matches production WDK's getTransactionReceipt().
      */
     async getTransactionReceipt(txHash) {
-      return this.client.getTxStatus(txHash);
+      try {
+        const status = await this.client.getTxStatus(txHash);
+        const confirmations = status.confirmed ? 1 : 0;
+        let rawTx;
+        try {
+          rawTx = await this.client.getTransaction(txHash);
+        } catch {
+        }
+        return {
+          ...status,
+          confirmations,
+          rawTx
+        };
+      } catch {
+        return null;
+      }
     }
     // -----------------------------------------------------------------------
     // Message signing (Bitcoin Signed Message format)
