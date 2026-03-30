@@ -314,14 +314,12 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       },
     },
     {
-      name: 'getBalance_missing_address',
+      name: 'getBalance_no_address_uses_account',
       fn: async () => {
-        try {
-          await WDKWallet.getBalance({chain: 'btc'} as any);
-          return {passed: false, detail: 'should have thrown'};
-        } catch (e: any) {
-          return {passed: true, detail: `correctly threw: ${(e.message ?? '').slice(0, 60)}`};
-        }
+        // With the account model, getBalance without address uses account index 0
+        const result = await WDKWallet.getBalance({chain: 'btc'} as any);
+        const ok = typeof result === 'string';
+        return {passed: ok, detail: `account model returned: ${result}`};
       },
     },
 
