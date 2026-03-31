@@ -549,9 +549,9 @@ const App = () => {
       let result: TestResult;
 
       try {
-        const {passed: ok, detail} = await test.fn();
+        const {passed: ok, skipped: skip, detail} = await test.fn();
         const ms = Date.now() - t0;
-        result = {name: test.name, passed: ok, detail, ms};
+        result = {name: test.name, passed: ok, skipped: skip, detail, ms};
       } catch (e: any) {
         const ms = Date.now() - t0;
         const msg = e?.message ?? String(e);

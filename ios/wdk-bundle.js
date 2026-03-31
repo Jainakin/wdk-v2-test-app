@@ -486,18 +486,23 @@ var __wdk_exports = (() => {
      * Production equivalent: WalletManagerBtc.getAccountByPath(path)
      */
     getAccountByPath(path, index, addressType) {
-      const cached = this.accounts.get(path);
+      let fullPath = path;
+      if (!path.startsWith("m/")) {
+        const purpose = addressType === "p2pkh" ? 44 : 84;
+        fullPath = `m/${purpose}'/${this.coinType}'/${path}`;
+      }
+      const cached = this.accounts.get(fullPath);
       if (cached && !cached.isDisposed) {
         return cached;
       }
       if (!this.keyManager) {
         throw new Error("KeyManager not set \u2014 call setKeyManager() before getAccount()");
       }
-      const keyHandle = this.keyManager.deriveAndTrack(path);
+      const keyHandle = this.keyManager.deriveAndTrack(fullPath);
       const publicKey = native.crypto.getPublicKey(keyHandle, this.curve);
-      const idx = index ?? parseInt(path.split("/").pop() ?? "0", 10);
-      const account = this.createAccount(keyHandle, publicKey, idx, path, addressType);
-      this.accounts.set(path, account);
+      const idx = index ?? parseInt(fullPath.split("/").pop() ?? "0", 10);
+      const account = this.createAccount(keyHandle, publicKey, idx, fullPath, addressType);
+      this.accounts.set(fullPath, account);
       return account;
     }
     /** Get all currently cached (non-disposed) accounts */
@@ -649,80 +654,6 @@ var __wdk_exports = (() => {
     payload[0] = version;
     payload.set(hash160, 1);
     return native.encoding.base58CheckEncode(payload);
-  }
-
-  // ../wdk-v2-wallet-btc/src/utxo.ts
-  var VBYTES_PER_INPUT = 68;
-  var VBYTES_PER_OUTPUT_DEFAULT = 31;
-  var TX_OVERHEAD_VBYTES = 11;
-  function estimateOutputVbytes(address) {
-    if (!address) return VBYTES_PER_OUTPUT_DEFAULT;
-    if (address.startsWith("1") || address.startsWith("m") || address.startsWith("n")) return 34;
-    if (address.startsWith("3") || address.startsWith("2")) return 32;
-    if (address.startsWith("bc1p") || address.startsWith("tb1p") || address.startsWith("bcrt1p")) return 43;
-    if (address.length > 50) return 43;
-    return VBYTES_PER_OUTPUT_DEFAULT;
-  }
-  var DUST_THRESHOLD_P2WPKH = 294;
-  var MIN_TX_FEE_SATS = 141;
-  var MAX_UTXO_INPUTS = 200;
-  function selectUtxos(utxos, targetAmount, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH, destinationAddr) {
-    const sorted = [...utxos].sort((a, b) => b.value - a.value);
-    const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
-    const destOutputVbytes = estimateOutputVbytes(destinationAddr);
-    const changeOutputVbytes = VBYTES_PER_OUTPUT_DEFAULT;
-    const changeCost = Math.ceil(changeOutputVbytes * feeRate);
-    const avoidResult = avoidChange(candidates, targetAmount, feeRate, destOutputVbytes, changeCost);
-    if (avoidResult) return avoidResult;
-    return addUntilReach(candidates, targetAmount, feeRate, dustThreshold, destOutputVbytes, changeOutputVbytes);
-  }
-  function avoidChange(sorted, targetAmount, feeRate, destOutputVbytes, changeCost) {
-    const selected = [];
-    let totalInput = 0;
-    for (const utxo of sorted) {
-      selected.push(utxo);
-      totalInput += utxo.value;
-      const vbytes = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes;
-      let fee = Math.ceil(vbytes * feeRate);
-      if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
-      if (totalInput >= targetAmount + fee) {
-        const remainder = totalInput - targetAmount - fee;
-        if (remainder < changeCost) {
-          return { selected: [...selected], fee: fee + remainder, change: 0 };
-        }
-      }
-    }
-    return null;
-  }
-  function addUntilReach(sorted, targetAmount, feeRate, dustThreshold, destOutputVbytes, changeOutputVbytes) {
-    const selected = [];
-    let totalInput = 0;
-    for (const utxo of sorted) {
-      selected.push(utxo);
-      totalInput += utxo.value;
-      const vbytes = TX_OVERHEAD_VBYTES + selected.length * VBYTES_PER_INPUT + destOutputVbytes + changeOutputVbytes;
-      let fee = Math.ceil(vbytes * feeRate);
-      if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
-      if (totalInput >= targetAmount + fee) {
-        const change = totalInput - targetAmount - fee;
-        if (change > 0 && change < dustThreshold) {
-          return { selected: [...selected], fee: totalInput - targetAmount, change: 0 };
-        }
-        return { selected: [...selected], fee, change };
-      }
-    }
-    return null;
-  }
-  function calculateMaxSpendable(utxos, feeRate, dustThreshold = DUST_THRESHOLD_P2WPKH) {
-    const sorted = [...utxos].sort((a, b) => b.value - a.value);
-    const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
-    const totalInput = candidates.reduce((sum, u) => sum + u.value, 0);
-    const vbytes = TX_OVERHEAD_VBYTES + candidates.length * VBYTES_PER_INPUT + 1 * VBYTES_PER_OUTPUT_DEFAULT;
-    let fee = Math.ceil(vbytes * feeRate);
-    if (fee < MIN_TX_FEE_SATS) fee = MIN_TX_FEE_SATS;
-    const maxSpendable = totalInput - fee;
-    if (maxSpendable < dustThreshold) return 0;
-    return maxSpendable;
   }
 
   // ../wdk-v2-wallet-btc/src/transaction.ts
@@ -1305,6 +1236,15 @@ var __wdk_exports = (() => {
       );
       return data.blockbook?.bestHeight ?? 0;
     }
+    async getVerboseTxBatch(txids) {
+      return Promise.all(txids.map(async (id) => {
+        try {
+          return await this.fetchJson(`/api/v2/tx/${id}`);
+        } catch {
+          return null;
+        }
+      }));
+    }
     async getDetailedHistory(address, limit = 25, _afterTxId, page = 1) {
       const data = await this.fetchJson(`/api/v2/address/${address}?details=txs&pageSize=${limit}&page=${page}`);
       if (!data.transactions) return [];
@@ -1567,6 +1507,15 @@ var __wdk_exports = (() => {
     async getBlockHeight() {
       const text = await this.fetchText("/blocks/tip/height");
       return parseInt(text, 10) || 0;
+    }
+    async getVerboseTxBatch(txids) {
+      return Promise.all(txids.map(async (id) => {
+        try {
+          return await this.fetchJson(`/tx/${id}`);
+        } catch {
+          return null;
+        }
+      }));
     }
     // ── Private helpers ──────────────────────────────────────────────────────
     async fetchJson(path) {
@@ -2007,6 +1956,16 @@ var __wdk_exports = (() => {
         fee: tx.fee ?? 0
       };
     }
+    async getVerboseTxBatch(txids) {
+      if (txids.length === 0) return [];
+      const batchCalls = txids.map((id) => ({
+        method: "blockchain.transaction.get",
+        params: [id, true]
+        // verbose=true
+      }));
+      const results = await this.transport.batch(batchCalls);
+      return results;
+    }
     async getBlockHeight() {
       try {
         const result = await this.limiter.run(
@@ -2076,6 +2035,156 @@ var __wdk_exports = (() => {
       default:
         throw new Error(`Unknown BTC client type: ${desc.type}`);
     }
+  }
+
+  // ../wdk-v2-wallet-btc/src/spend-planner.ts
+  var MIN_TX_FEE_SATS2 = 141;
+  var MAX_UTXO_INPUTS = 200;
+  var VBYTES_PER_P2WPKH_INPUT = 68;
+  var VBYTES_PER_P2PKH_INPUT = 148;
+  var OUTPUT_VBYTES = 34;
+  var TX_OVERHEAD_VBYTES = 11;
+  var DUST_LIMIT = {
+    p2pkh: 546,
+    // BIP44
+    p2wpkh: 294
+    // BIP84
+  };
+  function bipFromAddress(address) {
+    if (address.startsWith("bc1q") || address.startsWith("tb1q") || address.startsWith("bcrt1q")) return 84;
+    return 44;
+  }
+  function dustLimitForAddress(address) {
+    return bipFromAddress(address) === 84 ? DUST_LIMIT.p2wpkh : DUST_LIMIT.p2pkh;
+  }
+  function inputVbytesForAddress(address) {
+    return bipFromAddress(address) === 84 ? VBYTES_PER_P2WPKH_INPUT : VBYTES_PER_P2PKH_INPUT;
+  }
+  function estimateVsize(inputCount, outputCount, inputVbytes) {
+    return TX_OVERHEAD_VBYTES + inputCount * inputVbytes + outputCount * OUTPUT_VBYTES;
+  }
+  function sortByNetValue(utxos, feeRate, inputVbytes) {
+    const perInputFee = Math.ceil(inputVbytes * feeRate);
+    return [...utxos].map((u) => ({ u, netValue: u.value - perInputFee })).filter((x) => x.netValue > 0).sort((a, b) => b.netValue - a.netValue).map((x) => x.u);
+  }
+  function avoidChange(sorted, targetAmount, feeRate, inputVbytes, dustThreshold) {
+    const selected = [];
+    let totalInput = 0;
+    for (const utxo of sorted) {
+      selected.push(utxo);
+      totalInput += utxo.value;
+      const vsize = estimateVsize(selected.length, 1, inputVbytes);
+      let fee = Math.ceil(vsize * feeRate);
+      if (fee < MIN_TX_FEE_SATS2) fee = MIN_TX_FEE_SATS2;
+      if (totalInput >= targetAmount + fee) {
+        const remainder = totalInput - targetAmount - fee;
+        if (remainder <= dustThreshold) {
+          return {
+            utxos: [...selected],
+            fee: fee + remainder,
+            changeValue: 0
+          };
+        }
+      }
+    }
+    return null;
+  }
+  function addUntilReach(sorted, targetAmount, feeRate, inputVbytes, dustThreshold) {
+    const selected = [];
+    let totalInput = 0;
+    for (const utxo of sorted) {
+      selected.push(utxo);
+      totalInput += utxo.value;
+      const vsize = estimateVsize(selected.length, 2, inputVbytes);
+      let fee = Math.ceil(vsize * feeRate);
+      if (fee < MIN_TX_FEE_SATS2) fee = MIN_TX_FEE_SATS2;
+      if (totalInput >= targetAmount + fee) {
+        const change = totalInput - targetAmount - fee;
+        if (change > 0 && change <= dustThreshold) {
+          return {
+            utxos: [...selected],
+            fee: totalInput - targetAmount,
+            // all remainder becomes fee
+            changeValue: 0
+          };
+        }
+        return {
+          utxos: [...selected],
+          fee,
+          changeValue: change
+        };
+      }
+    }
+    return null;
+  }
+  function planSpend(utxos, fromAddress, toAddress, amount, feeRate) {
+    feeRate = Math.max(feeRate, 1);
+    const dustThreshold = dustLimitForAddress(fromAddress);
+    const inputVbytes = inputVbytesForAddress(fromAddress);
+    if (amount <= dustThreshold) {
+      throw new Error(`The amount must be bigger than the dust limit (= ${dustThreshold}).`);
+    }
+    if (!utxos || utxos.length === 0) {
+      throw new Error("No unspent outputs available.");
+    }
+    const sorted = sortByNetValue(utxos, feeRate, inputVbytes);
+    if (sorted.length === 0) {
+      throw new Error("Insufficient balance to send the transaction.");
+    }
+    const candidates = sorted.slice(0, MAX_UTXO_INPUTS);
+    const avoidResult = avoidChange(candidates, amount, feeRate, inputVbytes, dustThreshold);
+    if (avoidResult) {
+      avoidResult.fee = Math.max(avoidResult.fee, MIN_TX_FEE_SATS2);
+      return avoidResult;
+    }
+    const accResult = addUntilReach(candidates, amount, feeRate, inputVbytes, dustThreshold);
+    if (!accResult) {
+      throw new Error("Insufficient balance to send the transaction.");
+    }
+    if (accResult.utxos.length > MAX_UTXO_INPUTS) {
+      throw new Error("Exceeded maximum allowed inputs for transaction.");
+    }
+    accResult.fee = Math.max(accResult.fee, MIN_TX_FEE_SATS2);
+    return accResult;
+  }
+  function planMaxSpendable(utxos, fromAddress, feeRate) {
+    feeRate = Math.max(feeRate, 1);
+    const dustThreshold = dustLimitForAddress(fromAddress);
+    const inputVbytes = inputVbytesForAddress(fromAddress);
+    if (!utxos || utxos.length === 0) {
+      return { amount: 0, fee: 0, changeValue: 0 };
+    }
+    const perInputFee = Math.ceil(inputVbytes * feeRate);
+    let spendable = utxos.filter((u) => u.value - perInputFee > 0);
+    if (spendable.length === 0) {
+      return { amount: 0, fee: 0, changeValue: 0 };
+    }
+    if (spendable.length > MAX_UTXO_INPUTS) {
+      spendable = [...spendable].sort((a, b) => b.value - a.value).slice(0, MAX_UTXO_INPUTS);
+    }
+    const totalInput = spendable.reduce((sum, u) => sum + u.value, 0);
+    const inputCount = spendable.length;
+    const twoOutputVsize = estimateVsize(inputCount, 2, inputVbytes);
+    const twoOutputFee = Math.max(Math.ceil(twoOutputVsize * feeRate), MIN_TX_FEE_SATS2);
+    const twoOutputAmount = totalInput - twoOutputFee - dustThreshold;
+    if (twoOutputAmount > dustThreshold) {
+      return {
+        amount: twoOutputAmount,
+        fee: twoOutputFee,
+        changeValue: dustThreshold
+      };
+    }
+    const oneOutputVsize = estimateVsize(inputCount, 1, inputVbytes);
+    const oneOutputFee = Math.max(Math.ceil(oneOutputVsize * feeRate), MIN_TX_FEE_SATS2);
+    const oneOutputAmount = totalInput - oneOutputFee;
+    if (oneOutputAmount <= dustThreshold) {
+      return { amount: 0, fee: 0, changeValue: 0 };
+    }
+    return {
+      amount: oneOutputAmount,
+      fee: oneOutputFee,
+      changeValue: 0
+    };
   }
 
   // ../wdk-v2-wallet-btc/src/btc-helpers.ts
@@ -2187,7 +2296,7 @@ var __wdk_exports = (() => {
     // ── Balance ────────────────────────────────────────────────────────────
     async getBalance() {
       const balance = await this.client.getBalance(this.address);
-      return String(balance.confirmed + balance.unconfirmed);
+      return String(balance.confirmed);
     }
     // ── Fee rates ──────────────────────────────────────────────────────────
     async getFeeRates() {
@@ -2223,38 +2332,27 @@ var __wdk_exports = (() => {
         const utxos = await this.fetchUtxos();
         const btcPerKb = await this.client.estimateFee(3);
         const feeRate = btcPerKbToSatVb(btcPerKb);
-        const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH, params.to);
-        if (!selection) {
-          return {
-            feasible: false,
-            fee: 0,
-            feeRate,
-            inputCount: 0,
-            outputCount: 0,
-            totalInput: utxos.reduce((s, u) => s + u.value, 0),
-            change: 0,
-            changeValue: 0,
-            error: "Insufficient funds"
-          };
-        }
+        const plan = planSpend(utxos, this.address, params.to, targetSats, feeRate);
         return {
           feasible: true,
-          fee: selection.fee,
+          fee: plan.fee,
           feeRate,
-          inputCount: selection.selected.length,
-          outputCount: selection.change > 0 ? 2 : 1,
-          totalInput: selection.selected.reduce((s, u) => s + u.value, 0),
-          change: selection.change,
-          changeValue: selection.change
+          inputCount: plan.utxos.length,
+          outputCount: plan.changeValue > 0 ? 2 : 1,
+          totalInput: plan.utxos.reduce((s, u) => s + u.value, 0),
+          change: plan.changeValue,
+          changeValue: plan.changeValue
         };
       } catch (e) {
+        const utxos = await this.fetchUtxos().catch(() => []);
+        const btcPerKb = await this.client.estimateFee(3).catch(() => 0);
         return {
           feasible: false,
           fee: 0,
-          feeRate: 0,
+          feeRate: btcPerKbToSatVb(btcPerKb),
           inputCount: 0,
           outputCount: 0,
-          totalInput: 0,
+          totalInput: utxos.reduce((s, u) => s + u.value, 0),
           change: 0,
           changeValue: 0,
           error: e.message ?? String(e)
@@ -2265,13 +2363,12 @@ var __wdk_exports = (() => {
       const utxos = await this.fetchUtxos();
       const btcPerKb = await this.client.estimateFee(3);
       const feeRate = btcPerKbToSatVb(btcPerKb);
-      const maxSpendable = calculateMaxSpendable(utxos, feeRate, DUST_THRESHOLD_P2WPKH);
-      const totalInput = utxos.reduce((s, u) => s + u.value, 0);
+      const result = planMaxSpendable(utxos, this.address, feeRate);
       return {
-        maxSpendable,
-        amount: maxSpendable,
-        fee: totalInput - maxSpendable,
-        changeValue: 0,
+        maxSpendable: result.amount,
+        amount: result.amount,
+        fee: result.fee,
+        changeValue: result.changeValue,
         utxoCount: utxos.length
       };
     }
@@ -2279,59 +2376,96 @@ var __wdk_exports = (() => {
     async getTransactionHistory(limit = 25) {
       const result = await this.getTransfers({ limit });
       return result.transfers.map((tx) => ({
-        txHash: tx.txHash,
+        txHash: tx.txid,
         chain: "btc",
-        from: tx.direction === "received" ? tx.counterparties[0] ?? "" : this.address,
-        to: tx.direction === "sent" ? tx.counterparties[0] ?? "" : this.address,
-        amount: String(Math.abs(tx.amount)),
-        fee: String(tx.fee),
-        direction: tx.direction,
-        counterparties: tx.counterparties,
-        timestamp: tx.timestamp,
-        status: tx.confirmed ? "confirmed" : "pending",
-        blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
+        from: tx.direction === "incoming" ? tx.recipient ?? "" : this.address,
+        to: tx.direction === "outgoing" ? tx.recipient ?? "" : this.address,
+        amount: String(tx.value),
+        fee: String(tx.fee ?? 0),
+        direction: tx.direction === "incoming" ? "received" : "sent",
+        counterparties: tx.recipient ? [tx.recipient] : [],
+        timestamp: 0,
+        status: tx.height > 0 ? "confirmed" : "pending",
+        blockNumber: tx.height > 0 ? tx.height : void 0
       }));
     }
     async getTransfers(query) {
       const q = query;
-      const limit = q?.limit ?? 25;
-      const detailed = await this.client.getDetailedHistory(
-        this.address,
-        limit,
-        q?.afterTxId,
-        q?.page
-      );
-      let filtered = detailed;
-      if (q?.direction && q.direction !== "all") {
-        filtered = detailed.filter((tx) => tx.direction === q.direction);
-      }
+      const rowLimit = q?.limit ?? 25;
+      const skip = q?.skip ?? 0;
+      let dirFilter = "all";
+      if (q?.direction === "outgoing" || q?.direction === "sent") dirFilter = "outgoing";
+      else if (q?.direction === "incoming" || q?.direction === "received") dirFilter = "incoming";
+      const history = await this.client.getHistory(this.address);
+      const txEntries = history.slice(skip);
       const transfers = [];
-      for (const tx of filtered) {
-        const uniqueCounterparties = [...new Set(tx.counterparties)];
-        if (uniqueCounterparties.length <= 1) {
-          transfers.push({ ...tx, counterparties: uniqueCounterparties });
-        } else {
-          for (const cp of uniqueCounterparties) {
-            transfers.push({ ...tx, counterparties: [cp] });
+      let lastTxid;
+      const BATCH = 10;
+      for (let i = 0; i < txEntries.length && transfers.length < rowLimit; i += BATCH) {
+        const batch = txEntries.slice(i, i + BATCH);
+        const details = await this.client.getVerboseTxBatch(
+          batch.map((h) => h.tx_hash)
+        );
+        for (let j = 0; j < details.length && transfers.length < rowLimit; j++) {
+          const tx = details[j];
+          if (!tx) continue;
+          const entry = batch[j];
+          const height = entry.height > 0 ? entry.height : 0;
+          const isOutgoing = tx.vin.some(
+            (v) => v.prevout?.scriptpubkey_address === this.address
+          );
+          let fee;
+          if (isOutgoing) {
+            const totalIn = tx.vin.reduce(
+              (s, v) => s + (v.prevout?.value ?? 0),
+              0
+            );
+            const totalOut = tx.vout.reduce(
+              (s, v) => s + (v.value ?? 0),
+              0
+            );
+            fee = totalIn - totalOut;
           }
+          for (let vout = 0; vout < tx.vout.length && transfers.length < rowLimit; vout++) {
+            const output = tx.vout[vout];
+            const outAddr = output.scriptpubkey_address;
+            const isMine = outAddr === this.address;
+            let direction = null;
+            if (!isOutgoing && isMine) direction = "incoming";
+            else if (isOutgoing && !isMine) direction = "outgoing";
+            if (!direction) continue;
+            if (dirFilter !== "all" && dirFilter !== direction) continue;
+            transfers.push({
+              txid: tx.txid,
+              address: this.address,
+              vout,
+              height,
+              value: output.value ?? 0,
+              direction,
+              recipient: outAddr,
+              fee
+            });
+          }
+          lastTxid = tx.txid;
         }
       }
-      const hasMore = detailed.length >= limit;
-      const nextCursor = detailed.length > 0 ? detailed[detailed.length - 1].txHash : void 0;
-      return { transfers, hasMore, nextCursor };
+      return {
+        transfers,
+        hasMore: transfers.length >= rowLimit,
+        nextCursor: lastTxid
+      };
     }
     // ── Receipt ────────────────────────────────────────────────────────────
     async getTransactionReceipt(txHash) {
       try {
         const status = await this.client.getTxStatus(txHash);
+        if (!status.confirmed || status.blockHeight <= 0) return null;
         let confirmations = 0;
-        if (status.confirmed && status.blockHeight > 0) {
-          try {
-            const tipHeight = await this.client.getBlockHeight();
-            confirmations = tipHeight > 0 ? tipHeight - status.blockHeight + 1 : 1;
-          } catch {
-            confirmations = 1;
-          }
+        try {
+          const tipHeight = await this.client.getBlockHeight();
+          confirmations = tipHeight > 0 ? tipHeight - status.blockHeight + 1 : 1;
+        } catch {
+          confirmations = 1;
         }
         let rawTx;
         try {
@@ -2397,6 +2531,13 @@ var __wdk_exports = (() => {
         address: this.address
       }));
     }
+    // ── Unsupported interface methods (match production surface) ────────────
+    async getTokenBalance(_tokenAddress) {
+      throw new Error("The 'getTokenBalance' method is not supported on the bitcoin blockchain.");
+    }
+    async quoteTransfer(_options) {
+      throw new Error("The 'quoteTransfer' method is not supported on the bitcoin blockchain.");
+    }
   };
 
   // ../wdk-v2-wallet-btc/src/btc-account.ts
@@ -2418,7 +2559,7 @@ var __wdk_exports = (() => {
     // ── Read-only operations (delegate to shared client) ────────────────────
     async getBalance() {
       const balance = await this.client.getBalance(this.address);
-      return String(balance.confirmed + balance.unconfirmed);
+      return String(balance.confirmed);
     }
     async getFeeRates() {
       const [fast, medium, slow] = await Promise.all([
@@ -2452,29 +2593,16 @@ var __wdk_exports = (() => {
         const utxos = await this.fetchUtxos();
         const btcPerKb = await this.client.estimateFee(3);
         const feeRate = btcPerKbToSatVb(btcPerKb);
-        const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH, params.to);
-        if (!selection) {
-          return {
-            feasible: false,
-            fee: 0,
-            feeRate,
-            inputCount: 0,
-            outputCount: 0,
-            totalInput: utxos.reduce((s, u) => s + u.value, 0),
-            change: 0,
-            changeValue: 0,
-            error: "Insufficient funds"
-          };
-        }
+        const plan = planSpend(utxos, this.address, params.to, targetSats, feeRate);
         return {
           feasible: true,
-          fee: selection.fee,
+          fee: plan.fee,
           feeRate,
-          inputCount: selection.selected.length,
-          outputCount: selection.change > 0 ? 2 : 1,
-          totalInput: selection.selected.reduce((s, u) => s + u.value, 0),
-          change: selection.change,
-          changeValue: selection.change
+          inputCount: plan.utxos.length,
+          outputCount: plan.changeValue > 0 ? 2 : 1,
+          totalInput: plan.utxos.reduce((s, u) => s + u.value, 0),
+          change: plan.changeValue,
+          changeValue: plan.changeValue
         };
       } catch (e) {
         return {
@@ -2494,71 +2622,42 @@ var __wdk_exports = (() => {
       const utxos = await this.fetchUtxos();
       const btcPerKb = await this.client.estimateFee(3);
       const feeRate = btcPerKbToSatVb(btcPerKb);
-      const maxSpendable = calculateMaxSpendable(utxos, feeRate, DUST_THRESHOLD_P2WPKH);
-      const totalInput = utxos.reduce((s, u) => s + u.value, 0);
+      const result = planMaxSpendable(utxos, this.address, feeRate);
       return {
-        maxSpendable,
-        amount: maxSpendable,
-        fee: totalInput - maxSpendable,
-        changeValue: 0,
+        maxSpendable: result.amount,
+        amount: result.amount,
+        fee: result.fee,
+        changeValue: result.changeValue,
         utxoCount: utxos.length
       };
     }
     async getTransactionHistory(limit = 25) {
       const result = await this.getTransfers({ limit });
       return result.transfers.map((tx) => ({
-        txHash: tx.txHash,
+        txHash: tx.txid,
         chain: "btc",
-        from: tx.direction === "received" ? tx.counterparties[0] ?? "" : this.address,
-        to: tx.direction === "sent" ? tx.counterparties[0] ?? "" : this.address,
-        amount: String(Math.abs(tx.amount)),
-        fee: String(tx.fee),
-        direction: tx.direction,
-        counterparties: tx.counterparties,
-        timestamp: tx.timestamp,
-        status: tx.confirmed ? "confirmed" : "pending",
-        blockNumber: tx.blockHeight > 0 ? tx.blockHeight : void 0
+        from: tx.direction === "incoming" ? tx.recipient ?? "" : this.address,
+        to: tx.direction === "outgoing" ? tx.recipient ?? "" : this.address,
+        amount: String(tx.value),
+        fee: String(tx.fee ?? 0),
+        direction: tx.direction === "incoming" ? "received" : "sent",
+        counterparties: tx.recipient ? [tx.recipient] : [],
+        timestamp: 0,
+        status: tx.height > 0 ? "confirmed" : "pending",
+        blockNumber: tx.height > 0 ? tx.height : void 0
       }));
     }
-    async getTransfers(query) {
-      const q = query;
-      const limit = q?.limit ?? 25;
-      const detailed = await this.client.getDetailedHistory(
-        this.address,
-        limit,
-        q?.afterTxId,
-        q?.page
-      );
-      let filtered = detailed;
-      if (q?.direction && q.direction !== "all") {
-        filtered = detailed.filter((tx) => tx.direction === q.direction);
-      }
-      const transfers = [];
-      for (const tx of filtered) {
-        const uniqueCounterparties = [...new Set(tx.counterparties)];
-        if (uniqueCounterparties.length <= 1) {
-          transfers.push({ ...tx, counterparties: uniqueCounterparties });
-        } else {
-          for (const cp of uniqueCounterparties) {
-            transfers.push({ ...tx, counterparties: [cp] });
-          }
-        }
-      }
-      const hasMore = detailed.length >= limit;
-      const nextCursor = detailed.length > 0 ? detailed[detailed.length - 1].txHash : void 0;
-      return { transfers, hasMore, nextCursor };
-    }
+    // getTransfers() is inherited from BtcAccountReadOnly — production per-output semantics
     async getTransactionReceipt(txHash) {
       try {
         const status = await this.client.getTxStatus(txHash);
+        if (!status.confirmed || status.blockHeight <= 0) return null;
         let confirmations = 0;
-        if (status.confirmed && status.blockHeight > 0) {
-          try {
-            const tipHeight = await this.client.getBlockHeight();
-            confirmations = tipHeight > 0 ? tipHeight - status.blockHeight + 1 : 1;
-          } catch {
-            confirmations = 1;
-          }
+        try {
+          const tipHeight = await this.client.getBlockHeight();
+          confirmations = tipHeight > 0 ? tipHeight - status.blockHeight + 1 : 1;
+        } catch {
+          confirmations = 1;
         }
         let rawTx;
         try {
@@ -2620,12 +2719,12 @@ var __wdk_exports = (() => {
         const btcPerKb = await this.client.estimateFee(3);
         feeRate = btcPerKbToSatVb(btcPerKb);
       }
-      const selection = selectUtxos(utxos, targetSats, feeRate, DUST_THRESHOLD_P2WPKH, params.to);
-      if (!selection) throw new Error("Insufficient funds");
+      const plan = planSpend(utxos, this.address, params.to, targetSats, feeRate);
+      const sendDust = dustLimitForAddress(this.address);
       const spkBytes = native.encoding.hexDecode(utxos[0].scriptPubKey);
       const isLegacy = spkBytes.length === 25 && spkBytes[0] === 118;
       const inputs = await Promise.all(
-        selection.selected.map(async (u) => {
+        plan.utxos.map(async (u) => {
           const input = {
             txid: u.txid,
             vout: u.vout,
@@ -2645,8 +2744,8 @@ var __wdk_exports = (() => {
       const outputs = [
         { address: params.to, value: targetSats }
       ];
-      if (selection.change > 0) {
-        outputs.push({ address: this.address, value: selection.change });
+      if (plan.changeValue > 0) {
+        outputs.push({ address: this.address, value: plan.changeValue });
       }
       const keyHandles = inputs.map(() => this.keyHandle);
       const psbtInputs = inputs.map((inp) => ({
@@ -2660,25 +2759,60 @@ var __wdk_exports = (() => {
         address: out.address,
         value: out.value
       }));
-      const { rawTx, txid } = buildAndSignPsbt(psbtInputs, psbtOutputs, keyHandles);
-      const rawBytes = native.encoding.hexDecode(rawTx);
-      const actualWeight = rawBytes.length * 4;
-      const actualVsize = Math.ceil(actualWeight / 4);
-      const minRequiredFee = Math.ceil(actualVsize * feeRate);
-      if (selection.fee < minRequiredFee) {
+      let signed = buildAndSignPsbt(psbtInputs, psbtOutputs, keyHandles);
+      let currentFee = plan.fee;
+      const rawBytes = native.encoding.hexDecode(signed.rawTx);
+      const actualVsize = rawBytes.length;
+      const requiredFee = Math.ceil(actualVsize * feeRate);
+      if (requiredFee > currentFee) {
+        const delta = requiredFee - currentFee;
+        currentFee = requiredFee;
+        let currentChange = plan.changeValue;
+        let currentTarget = targetSats;
+        if (currentChange > 0) {
+          currentChange -= delta;
+          if (currentChange <= sendDust) currentChange = 0;
+        } else {
+          currentTarget -= delta;
+          if (currentTarget <= sendDust) {
+            throw new Error(`The amount after fees must be bigger than the dust limit (= ${sendDust}).`);
+          }
+        }
+        const rebalancedOutputs = [
+          { address: params.to, value: currentTarget }
+        ];
+        if (currentChange > 0) {
+          rebalancedOutputs.push({ address: this.address, value: currentChange });
+        }
+        const rebPsbtOutputs = rebalancedOutputs.map((out) => ({
+          address: out.address,
+          value: out.value
+        }));
+        signed = buildAndSignPsbt(psbtInputs, rebPsbtOutputs, keyHandles);
+        const rebBytes = native.encoding.hexDecode(signed.rawTx);
+        const rebVsize = rebBytes.length;
+        const rebRequired = Math.ceil(rebVsize * feeRate);
+        if (rebRequired > currentFee) {
+          throw new Error("Fee shortfall after output rebalance.");
+        }
       }
-      const broadcastTxid = await this.client.broadcast(rawTx);
-      return { txHash: broadcastTxid || txid, fee: selection.fee };
+      const broadcastTxid = await this.client.broadcast(signed.rawTx);
+      return { txHash: broadcastTxid || signed.txid, fee: currentFee };
     }
     async sign(message) {
       const msgHash = bitcoinMessageHash(message);
       const recoverableSig = native.crypto.signRecoverableSecp256k1(this.keyHandle, msgHash);
       const recid = recoverableSig[64];
-      const flagByte = 27 + recid + 4;
+      const isSegwit = this.address.startsWith("bc1q") || this.address.startsWith("tb1q") || this.address.startsWith("bcrt1q");
+      const flagByte = 27 + recid + 4 + (isSegwit ? 8 : 0);
       const result = new Uint8Array(65);
       result[0] = flagByte;
       result.set(recoverableSig.slice(0, 64), 1);
       return uint8ArrayToBase64(result);
+    }
+    // ── Unsupported interface methods (match production surface) ────────────
+    async transfer(_options) {
+      throw new Error("The 'transfer' method is not supported on the bitcoin blockchain.");
     }
     // ── Downcast to read-only ──────────────────────────────────────────────
     toReadOnly() {
