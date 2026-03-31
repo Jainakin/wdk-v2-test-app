@@ -59,7 +59,7 @@ const TEST_MNEMONIC =
 
 // ── Test Logger ─────────────────────────────────────────────────────────────
 
-type TestResult = {name: string; passed: boolean; detail: string; ms: number};
+type TestResult = {name: string; passed: boolean; skipped?: boolean; detail: string; ms: number};
 
 function tlog(msg: string) {
   const line = `[TEST] ${msg}`;
@@ -69,7 +69,7 @@ function tlog(msg: string) {
 
 // ── Test Cases ──────────────────────────────────────────────────────────────
 
-type TestFn = () => Promise<{passed: boolean; detail: string}>;
+type TestFn = () => Promise<{passed: boolean; skipped?: boolean; detail: string}>;
 
 function defineTests(): Array<{name: string; fn: TestFn}> {
   // Shared state across tests within a single run
@@ -455,7 +455,7 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
           return {passed: ok, detail: `${sats} sat (${sats/1e8} BTC)`};
         } catch (e: any) {
           // Electrs not running — skip gracefully
-          return {passed: true, detail: `SKIPPED (electrs not running): ${(e.message ?? '').slice(0, 40)}`};
+          return {passed: false, skipped: true, detail: `SKIPPED (electrs not running): ${(e.message ?? '').slice(0, 40)}`};
         }
       },
     },
@@ -466,7 +466,7 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
           const bal = await WDKWallet.getBalance({chain: 'btc'});
           const sats = parseInt(bal, 10);
           if (sats < 100000) {
-            return {passed: true, detail: `SKIPPED: balance too low (${sats} sats)`};
+            return {passed: false, skipped: true, detail: `SKIPPED: balance too low (${sats} sats)`};
           }
           // Send 500000 sats to miner address
           const dest = 'bcrt1qe4dj3neetuh6yqdzhyge9ls2u7cvpvc6r6z8la';
@@ -477,7 +477,7 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
           return {passed: ok, detail: `txHash=${(result.txHash ?? '').slice(0, 16)}... fee=${result.fee}`};
         } catch (e: any) {
           // Electrs not running or no funds
-          return {passed: true, detail: `SKIPPED: ${(e.message ?? '').slice(0, 60)}`};
+          return {passed: false, skipped: true, detail: `SKIPPED: ${(e.message ?? '').slice(0, 60)}`};
         }
       },
     },
@@ -485,11 +485,9 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
       name: 'regtest_balance_after_send',
       fn: async () => {
         try {
-          // getBalance now returns confirmed + unconfirmed (mempool-aware).
-          // After sending 500000 + ~282 fee from 1000000:
-          // confirmed=1000000, unconfirmed=(499718-1000000)=-500282
-          // total = 1000000 + (-500282) = 499718
-          // Small delay for electrs to pick up the mempool tx
+          // getBalance returns confirmed only (matching production).
+          // After send is mined, confirmed balance should decrease.
+          // Small delay for electrs to pick up the block/mempool tx
           await new Promise(r => setTimeout(r, 2000));
           const bal = await WDKWallet.getBalance({chain: 'btc'});
           const sats = parseInt(bal, 10);
@@ -500,7 +498,7 @@ function defineTests(): Array<{name: string; fn: TestFn}> {
             detail: `${sats} sat (expected ~${expected}, sent 500000+fee)`,
           };
         } catch (e: any) {
-          return {passed: true, detail: `SKIPPED: ${(e.message ?? '').slice(0, 40)}`};
+          return {passed: false, skipped: true, detail: `SKIPPED: ${(e.message ?? '').slice(0, 40)}`};
         }
       },
     },
@@ -544,6 +542,7 @@ const App = () => {
     const allResults: TestResult[] = [];
     let passed = 0;
     let failed = 0;
+    let skipped = 0;
 
     for (const test of tests) {
       const t0 = Date.now();
@@ -559,7 +558,11 @@ const App = () => {
         result = {name: test.name, passed: false, detail: `THREW: ${msg.slice(0, 120)}`, ms};
       }
 
-      if (result.passed) {
+      if (result.skipped) {
+        skipped++;
+        tlog(`SKIP ${result.name} (${result.ms}ms) — ${result.detail}`);
+        appendLog(`⏭️ ${result.name} (${result.ms}ms) — ${result.detail}`);
+      } else if (result.passed) {
         passed++;
         tlog(`PASS ${result.name} (${result.ms}ms) — ${result.detail}`);
         appendLog(`✅ ${result.name} (${result.ms}ms) — ${result.detail}`);
@@ -582,10 +585,10 @@ const App = () => {
     }
 
     tlog('═══════════════════════════════════════');
-    tlog(`DONE ${passed}/${passed + failed} passed, ${failed} failed`);
+    tlog(`DONE ${passed}/${passed + failed + skipped} passed, ${failed} failed, ${skipped} skipped`);
     tlog('═══════════════════════════════════════');
     tlogFlush();
-    appendLog(`\n═══ ${passed}/${passed + failed} passed, ${failed} failed ═══`);
+    appendLog(`\n═══ ${passed}/${passed + failed + skipped} passed, ${failed} failed, ${skipped} skipped ═══`);
 
     setRunning(false);
   }, [appendLog]);
@@ -646,8 +649,9 @@ const App = () => {
 
   // ── Render ──────────────────────────────────────────────────────────────
 
-  const passCount = results.filter(r => r.passed).length;
-  const failCount = results.filter(r => !r.passed).length;
+  const passCount = results.filter(r => r.passed && !r.skipped).length;
+  const skipCount = results.filter(r => r.skipped).length;
+  const failCount = results.filter(r => !r.passed && !r.skipped).length;
 
   return (
     <SafeAreaView style={styles.root}>
@@ -659,6 +663,7 @@ const App = () => {
           <Text style={styles.summaryText}>
             {failCount === 0 ? '✅' : '❌'}{' '}
             {passCount}/{results.length} passed
+            {skipCount > 0 ? ` · ${skipCount} skipped` : ''}
             {failCount > 0 ? ` · ${failCount} failed` : ''}
           </Text>
         </View>
@@ -712,8 +717,8 @@ const App = () => {
           <ScrollView style={styles.resultsScroll}>
             {results.map((r, i) => (
               <View key={i} style={styles.resultRow}>
-                <Text style={r.passed ? styles.resultPass : styles.resultFail}>
-                  {r.passed ? '✅' : '❌'}
+                <Text style={r.skipped ? styles.resultSkip : r.passed ? styles.resultPass : styles.resultFail}>
+                  {r.skipped ? '⏭️' : r.passed ? '✅' : '❌'}
                 </Text>
                 <View style={styles.resultInfo}>
                   <Text style={styles.resultName}>{r.name}</Text>
@@ -789,6 +794,7 @@ const styles = StyleSheet.create({
   resultRow: {flexDirection: 'row', alignItems: 'flex-start', marginBottom: 6, gap: 6},
   resultPass: {fontSize: 14},
   resultFail: {fontSize: 14},
+  resultSkip: {fontSize: 14, opacity: 0.6},
   resultInfo: {flex: 1},
   resultName: {fontSize: 12, fontWeight: '600', color: '#e0e0e0'},
   resultDetail: {fontSize: 10, color: '#888', fontFamily: 'Menlo'},
